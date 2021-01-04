@@ -340,11 +340,9 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
 
     private class WithinRunnable implements Runnable{
         final Runnable command;
-        final ReentrantLock interruptLock;
 
-        public WithinRunnable(Runnable command) {
+        WithinRunnable(Runnable command) {
             this.command = command;
-            this.interruptLock = new ReentrantLock();
         }
 
         boolean hold = false;
@@ -353,19 +351,15 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
         public void run() {
             try {
                 command.run();
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 e.printStackTrace();
-            }finally {
-                ReentrantLock lock = interruptLock;
-                lock.lock();
-                try {
-                    if(!hold){
-                        hold = true;
-                    }else{
-                        Thread.interrupted();
-                    }
-                } finally {
-                    lock.unlock();
+            }
+
+            synchronized (this){
+                if(!hold){
+                    hold = true;
+                }else{
+                    Thread.interrupted();
                 }
             }
         }
@@ -373,28 +367,26 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
         /**
          * 对check线程的消耗很低
          */
-        public void checkOvertime(){
-            ReentrantLock lock = interruptLock;
-            lock.lock();
-            try {
-                if(!hold){
-                    hold = true;
-                    thread.interrupt();
-                }
-            } finally {
-                lock.unlock();
+        public final synchronized void checkOvertime(){
+            if(!hold){
+                hold = true;
+                thread.interrupt();
             }
         }
     }
 
     /**
      * 超过超时时间就interrupt
+     * 还可以使用scheduleWithIn方法来代替这个方法并获得很好的业务性
      * @param command
      * @param overTimeInMillions
      * @param checkThread  一定是线程池之外的一个空闲线程,防止线程池中所有的线程都卡在任务上
      * @return
      */
     public final void executeWithIn(Runnable command,long overTimeInMillions,ScheduledThreadWorkerBase checkThread){
+        if (checkThread == this) {
+            throw new RuntimeException("cancel thread can't be self thread");
+        }
         WithinRunnable withinRunnable = new WithinRunnable(command);
         execute(withinRunnable::run);
         checkThread.innerSchedule(withinRunnable::checkOvertime,overTimeInMillions);

@@ -2,11 +2,11 @@ package mx.homeCooking;
 
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 实现jdk的调度线程池接口
+ * 可以通过向schedule方法输入为0的参数delay实现execute promise
  */
 public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements ScheduledExecutorService {
 
@@ -18,238 +18,75 @@ public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements 
         super(name);
     }
 
+    private final TaskFuture toSchedule(Object command, boolean isCallable, long delayInMillionSeconds) {
+        TaskFuture future = isCallable ?
+                new TaskFuture(thread, (Callable) command, delayInMillionSeconds) :
+                new TaskFuture(thread, (Runnable) command, delayInMillionSeconds);
+        this.innerSchedule(future, delayInMillionSeconds);
 
-    abstract class AbstractFuture<V> implements ScheduledFuture<V> {
-
-        protected final long cutoffTime;
-
-        /**
-         * 占内存应该比一个queue少
-         */
-        protected final CompletableFuture<V> result = new CompletableFuture();
-
-        protected final synchronized boolean completeExceptionally(Throwable throwable){
-            boolean isDone = result.completeExceptionally(throwable);
-            Thread.interrupted();
-            return isDone;
-        }
-
-        protected final synchronized boolean complete(V res){
-            boolean isDone =  result.complete(res);
-            Thread.interrupted();
-            return isDone;
-        }
-
-        AbstractFuture(long cutoffTime) {
-            this.cutoffTime = cutoffTime;
-        }
-
-        @Override
-        public long getDelay(TimeUnit unit) {
-            long delayInMILLISECONDS = this.cutoffTime - System.currentTimeMillis();
-
-            if (unit == null || unit.equals(TimeUnit.MILLISECONDS)) {
-                return delayInMILLISECONDS;
-            }
-            /**
-             * DelayQueue里面的实现是纳秒
-             */
-            if (unit.equals(TimeUnit.NANOSECONDS)) {
-                return delayInMILLISECONDS * 1000000;
-            }
-
-            if (unit.equals(TimeUnit.MICROSECONDS)) {
-                return delayInMILLISECONDS * 1000;
-            }
-
-            throw new RuntimeException();
-        }
-
-        @Override
-        public int compareTo(Delayed o) {
-            AbstractFuture that = (AbstractFuture) o;
-            /**
-             * 从小到大排序
-             */
-            return (int) (this.cutoffTime - that.cutoffTime);
-        }
-
-        @Override
-        public boolean isDone() {
-            return result.isDone();
-        }
-
-        @Override
-        public V get() throws InterruptedException, ExecutionException {
-            return result.get();
-        }
-
-        @Override
-        public V get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
-            V v = result.get(timeout, unit);
-            if (v == null) {
-                throw new TimeoutException();
-            }
-            return v;
-        }
-    }
-
-    public static final Exception cancelException = new CancellationException();
-
-    public final class TaskWrapper<V> extends AbstractFuture<V> implements Runnable {
-        final Runnable wrappedTask;
-
-        TaskWrapper(Runnable task, long delayInMILLISECONDS) {
-            super(System.currentTimeMillis() + delayInMILLISECONDS);
-            this.wrappedTask = wrapTask(task, false);
-        }
-
-        TaskWrapper(Callable<V> task, long delayInMILLISECONDS) {
-            super(System.currentTimeMillis() + delayInMILLISECONDS);
-            this.wrappedTask = wrapTask(task, true);
-        }
-
-        TaskWrapper() {
-            super(0);
-            wrappedTask = null;
-        }
-
-        /**
-         * 返回promise对象,方便更加灵活的进行链式操作,不过可能会因此卡死cancel方法
-         * 所以mayInterruptIfRunning==true不是一个好的选择
-         */
-        public final CompletionStage<V> getCompletionStage() {
-            return result;
-        }
-
-        /**
-         * 是否占有控制权
-         * 在任务开始前抢占控制权
-         */
-        final AtomicLong holdFlagBeforeStart = new AtomicLong(-1);
-
-        /**
-         * 中断是否是cancel方法引起的
-         */
-        boolean interruptByCancel = false;
-
-        final Runnable wrapTask(Object task, boolean isCallable) {
-            return new Runnable() {
-                @Override
-                public void run() {
-                    if (holdFlagBeforeStart.compareAndSet(-1, 0)) {
-                        V res = null;
-                        try {
-                            if (isCallable) {
-                                res = (V) ((Callable) task).call();
-                            } else {
-                                ((Runnable) task).run();
-                            }
-                            //synchronized(future)
-                            complete(res);
-                        } catch (InterruptedException e) {
-                            Exception e1 = e;
-                            boolean byCancel;
-                            synchronized (TaskWrapper.this) {
-                                byCancel = interruptByCancel;
-                            }
-                            /**
-                             * 如果这个中断是cancel方法引起的,有可能是业务代码自己触发的中断(这样很危险)
-                             * 最终以影响的结果是isCancelled方法,这个isCancelled方法意义不是很大
-                             */
-                            if(byCancel){
-                                e1 = cancelException;
-                            }
-                            completeExceptionally(e1);
-                        } catch (Throwable e) {
-                            //业务代码中抛出的其他异常
-                            completeExceptionally(e);
-                        }
-                    }
-                }//~run
-            };
-        }
-
-        @Override
-        public void run() {
-            wrappedTask.run();
-        }
-
-        /**
-         * 取消一个任务,不会从任务队列中删除,而是不再执行
-         * @param mayInterruptIfRunning
-         * @return 当返回false时, 表示已经执行完了, 或者mayInterruptIfRunning==false,但返回为true时表示在task开始之前成功取消了
-         * 或者...不知道了(看task内部怎么处理了)
-         */
-        @Override
-        public boolean cancel(boolean mayInterruptIfRunning) {
-            if (holdFlagBeforeStart.compareAndSet(-1, 1)) {
-                //设置get时抛出的异常,会被包装成executionException
-                result.completeExceptionally(cancelException);
-                //这里肯定取消了,不是有可能
-                return true;
-            } else {
-                //判断是否被其他cancel线程所占据
-                if (holdFlagBeforeStart.get() != 0) {
-                    return false;
-                }
-            }
-            /**
-             * holdFlagBeforeStart.get()==0意味着running
-             */
-
-            if(mayInterruptIfRunning){
-                synchronized (this) {
-                    if (!result.isDone() && !interruptByCancel) {
-                        interruptByCancel = true;
-                        thread.interrupt();
-                        return true;
-                    }
-                }
-            }
-
-            return false;
-        }
-
-
-        @Override
-        public boolean isCancelled() {
-            if (result.isCompletedExceptionally()) {
-                try {
-                    //这里会抛出异常,可能会影响一些性能
-                    result.get();
-                } catch (InterruptedException e) {
-
-                } catch (ExecutionException e) {
-                    if (e.getCause() == cancelException) {
-                        return true;
-                    }
-                } catch (Throwable e) {
-
-                }
-            }
-            return false;
-        }
-    }
-
-    private final TaskWrapper toSchedule(Object command, long delayInMillionSeconds) {
-        TaskWrapper wrapper = command instanceof Runnable ?
-                new TaskWrapper((Runnable) command, delayInMillionSeconds)
-                : new TaskWrapper((Callable) command, delayInMillionSeconds);
-        this.innerSchedule(wrapper, delayInMillionSeconds);
-
-        return wrapper;
-    }
-
-
-    @Override
-    public TaskWrapper<?> schedule(Runnable command, long delay, TimeUnit unit) {
-        return toSchedule(command, unit.toMillis(delay));
+        return future;
     }
 
     @Override
-    public <V> TaskWrapper<V> schedule(Callable<V> callable, long delay, TimeUnit unit) {
-        return toSchedule(callable, unit.toMillis(delay));
+    public TaskFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+        return toSchedule(command, false,unit.toMillis(delay));
+    }
+
+    @Override
+    public <V> TaskFuture<V> schedule(Callable<V> callable, long delay, TimeUnit unit) {
+        return toSchedule(callable, true,unit.toMillis(delay));
+    }
+
+    private final void addCancelWhenTimeout(long timeout, ScheduledThreadWorkerBase checkThread, TimeUnit unit, TaskFuture<?>[] futures) {
+        checkThread.innerSchedule(() -> {
+            //防止极端情况
+            TaskFuture<?> future0;
+            do {
+                synchronized (futures) {
+                    future0 = futures[0];
+                }
+            } while (future0 == null);
+            future0.cancel(true);
+        }, timeout, unit);
+    }
+
+    final ScheduledFuture<?> toScheduleWithIn(Object command, boolean isCallable, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
+        if (checkThread == this) {
+            throw new RuntimeException("cancel thread can't be self thread");
+        }
+
+        final TaskFuture<?>[] futures = new TaskFuture<?>[1];
+
+        TaskFuture<?> future;
+        if (isCallable) {
+            future = schedule(() -> {
+                //启动之后,添加cancel逻辑
+                addCancelWhenTimeout(timeout, checkThread, unit, futures);
+                //运行原command
+                return ((Callable) command).call();
+            }, delay, unit);
+        } else {
+            future = schedule(() -> {
+                addCancelWhenTimeout(timeout, checkThread, unit, futures);
+                ((Runnable) command).run();
+            }, delay, unit);
+        }
+
+        synchronized (futures) {
+            futures[0] = future;
+        }
+
+        return future;
+    }
+
+
+    public ScheduledFuture<?> scheduleWithIn(Runnable command, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
+        return toScheduleWithIn(command, false, timeout, checkThread, delay, unit);
+    }
+
+
+    public <V> ScheduledFuture<V> scheduleWithIn(Callable<V> callable, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
+        return (ScheduledFuture<V>) toScheduleWithIn(callable, true, timeout, checkThread, delay, unit);
     }
 
 
@@ -320,7 +157,7 @@ public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements 
         nextFuture.set(schedule(task, initialDelay, unit));
 
         /**
-         * 除覆盖方法外的其他方法都无意义
+         * 继承AbstractFuture为了图省事,除覆盖方法外的其他方法都无意义
          */
         AbstractFuture future = new AbstractFuture(0) {
             @Override
@@ -328,9 +165,16 @@ public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements 
                 /**
                  * 永远返回距离下次调度还有多长时间
                  */
-                return nextFuture.get().getDelay(unit);
+                long delay = nextFuture.get().getDelay(unit);
+                //可能正在执行中,还没有生成下一次的future
+                return delay < 0 ? 0 : delay;
             }
 
+            /**
+             *
+             * @param mayInterruptIfRunning 无意义
+             * @return
+             */
             @Override
             public boolean cancel(boolean mayInterruptIfRunning) {
                 canceled.set(true);
@@ -360,4 +204,6 @@ public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements 
     public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command, long initialDelay, long delay, TimeUnit unit) {
         return toScheduleManyTimes(command, initialDelay, delay, unit, false);
     }
+
+
 }
