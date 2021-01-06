@@ -8,7 +8,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 实现jdk的调度线程池接口
  * 可以通过向schedule方法输入为0的参数delay实现execute promise
  */
-public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements ScheduledExecutorService {
+public class ScheduledThreadWorker extends ThreadWorker implements ScheduledExecutorService {
 
     public ScheduledThreadWorker(String name) {
         super(name);
@@ -33,7 +33,7 @@ public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements 
         return toSchedule(callable, true,unit.toMillis(delay));
     }
 
-    private final void addCancelWhenTimeout(long timeout, ScheduledThreadWorkerBase checkThread, TimeUnit unit, TaskFuture<?>[] futures) {
+    private final void addCancelWhenTimeout(long timeout, ThreadWorker checkThread, TimeUnit unit, TaskFuture<?>[] futures) {
         checkThread.innerSchedule(() -> {
             //防止极端情况
             TaskFuture<?> future0;
@@ -46,7 +46,7 @@ public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements 
         }, timeout, unit);
     }
 
-    final ScheduledFuture<?> toScheduleTimeout(Object command, boolean isCallable, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
+    final TaskFuture<?> toScheduleTimeout(Object command, boolean isCallable, long timeout, ThreadWorker checkThread, long delay, TimeUnit unit) {
         if (checkThread == this) {
             throw new RuntimeException("cancel thread can't be self thread");
         }
@@ -76,13 +76,13 @@ public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements 
     }
 
 
-    public ScheduledFuture<?> scheduleTimeout(Runnable command, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
+    public TaskFuture<?> scheduleTimeout(Runnable command, long timeout, ThreadWorker checkThread, long delay, TimeUnit unit) {
         return toScheduleTimeout(command, false, timeout, checkThread, delay, unit);
     }
 
 
-    public <V> ScheduledFuture<V> scheduleTimeout(Callable<V> callable, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
-        return (ScheduledFuture<V>) toScheduleTimeout(callable, true, timeout, checkThread, delay, unit);
+    public <V> TaskFuture<V> scheduleTimeout(Callable<V> callable, long timeout, ThreadWorker checkThread, long delay, TimeUnit unit) {
+        return (TaskFuture<V>) toScheduleTimeout(callable, true, timeout, checkThread, delay, unit);
     }
 
 

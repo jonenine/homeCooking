@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-class ScheduledThreadWorkerBase extends AbstractExecutorService {
+class ThreadWorker extends AbstractExecutorService {
 
     final Thread thread;
 
@@ -46,7 +46,7 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
     /**
      * @param name
      */
-    ScheduledThreadWorkerBase(String name) {
+    ThreadWorker(String name) {
         continueWorking = false;
 
         thread = new Thread(worker);
@@ -391,7 +391,7 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
      * @param checkThread        一定是线程池之外的一个空闲线程,防止线程池中所有的线程都卡在任务上
      * @return
      */
-    public final void executeTimeout(Runnable command, long timeoutInMillions, ScheduledThreadWorkerBase checkThread) {
+    public final void executeTimeout(Runnable command, long timeoutInMillions, ThreadWorker checkThread) {
         if (checkThread == this) {
             throw new RuntimeException("cancel thread can't be self thread");
         }

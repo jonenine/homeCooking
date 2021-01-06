@@ -33,7 +33,7 @@ import java.util.stream.Stream;
  */
 public class ThreadGroup extends AbstractExecutorService {
 
-    private final ThreadProxy[] proxies;
+    protected final ThreadProxy[] proxies;
     private final int maxAmount;
     /**
      * 每次增加的线程数
@@ -44,11 +44,12 @@ public class ThreadGroup extends AbstractExecutorService {
     private final boolean isBind;
     private final boolean isSchedule;
 
-
     /**
      * 当前线程数
      */
     private volatile int amount = 0;
+
+    protected ThreadWorker maintainThread;
 
     /**
      * @param groupName
@@ -72,12 +73,13 @@ public class ThreadGroup extends AbstractExecutorService {
         }
 
         /**
-         * 初始化时启动checkable线程池
+         * bind池用来timeout
+         * schedule池和普通池用来check和timeout
          */
-        if (!isBind && !isSchedule) {
-            ScheduledThreadWorkerBase initCheckThread = new ScheduledThreadWorkerBase(groupName + "checker");
-            CheckRunnable checkrunnable = createCheckRunnable(initCheckThread);
-            initCheckThread.innerSchedule(checkrunnable::run, 60);
+        maintainThread = new ThreadWorker(groupName + "checker");
+
+        if (!isBind) {
+            maintainThread.innerSchedule(createCheckRunnable()::run, 60);
         }
     }
 
@@ -107,13 +109,14 @@ public class ThreadGroup extends AbstractExecutorService {
         }
     }
 
+    volatile int random = 7;
 
     /**
      * 此方法看来已经保证在同时发生shutdown时不会丢失任务
      */
     @Override
     public void execute(Runnable task) {
-        int hash = (int) Thread.currentThread().getId();
+        int hash = (int) Thread.currentThread().getId() + random;
         int _mount = amount;
         while (_mount > 0) {
             /**
@@ -125,6 +128,9 @@ public class ThreadGroup extends AbstractExecutorService {
             _mount--;
         }
 
+        /**
+         * 启动线程0来执行任务
+         */
         proxies[0].start(task);
     }
 
@@ -146,15 +152,17 @@ public class ThreadGroup extends AbstractExecutorService {
         }
     }
 
-    final CheckRunnable createCheckRunnable(ScheduledThreadWorkerBase initCheckThread) {
+    final CheckRunnable createCheckRunnable() {
         return new CheckRunnable() {
 
             volatile long startLazyTime = 0;
             volatile int queueSizeSum = 0;
-            volatile ScheduledThreadWorkerBase singleCheckThread = initCheckThread;
+            volatile ThreadWorker singleCheckThread = maintainThread;
 
             @Override
             long run() {
+                if (random++ > 10000) random = 1;
+
                 long nextInterval;
                 /**
                  * 和下面的shutdown方法互斥
@@ -162,9 +170,9 @@ public class ThreadGroup extends AbstractExecutorService {
                 synchronized (ThreadGroup.this) {
                     if (alreadyShutDown) {
                         //关闭checkThread
-                        ScheduledThreadWorkerBase singleThread = singleCheckThread;
+                        ThreadWorker singleThread = singleCheckThread;
                         singleCheckThread = null;
-                        if(singleThread!=null){
+                        if (singleThread != null) {
                             singleThread.shutdown();
                         }
                         //如果worker争抢执行,这里退出了不会再创建check线程,如果check线程执行,就没有下一次调度了
@@ -174,29 +182,38 @@ public class ThreadGroup extends AbstractExecutorService {
                     nextInterval = check();
                 }
 
+
                 /**
-                 * 当线程池满时,让所有的worker自己进行check
-                 * 当不满时,使用一个独立的check线程池
+                 * 只有普通池才会切换维护线程池
                  */
-                if (amount == maxAmount) {
-                    final ScheduledThreadWorkerBase singleThread = singleCheckThread;
-                    singleCheckThread = null;
-                    //在任务中1.shutdown独立的checkThead 2.对所有线程设置checkable,启动对checkable的争抢执行
-                    execute(() -> {
-                        singleThread.shutdown();
-                        setCheckableToAllThread(this);
-                    });
-                } else {
-                    if (singleCheckThread == null) {
-                        //对所有线程清除checkable,改为在独立的运维线程中做check工作
-                        clearCheckableToAllThread();
-                        singleCheckThread = new ScheduledThreadWorkerBase(groupName + "checker");
+                if (!isSchedule) {
+                    /**
+                     * 当线程池满时,让所有的worker自己进行check
+                     * 当不满时,使用一个独立的check线程池
+                     */
+                    if (amount == maxAmount) {
+                        final ThreadWorker singleThread = singleCheckThread;
+                        singleCheckThread = null;
+                        //在任务中1.shutdown独立的checkThead 2.对所有线程设置checkable,启动对checkable的争抢执行
+                        execute(() -> {
+                            singleThread.shutdown();
+                            setCheckableToAllThread(this);
+                        });
+                    } else {
+                        if (singleCheckThread == null) {
+                            //对所有线程清除checkable,改为在独立的运维线程中做check工作
+                            clearCheckableToAllThread();
+                            singleCheckThread = new ThreadWorker(groupName + "checker");
+                        }
                     }
                 }
+
 
                 if (singleCheckThread != null) {
                     singleCheckThread.innerSchedule(this::run, nextInterval);
                 }
+
+                if (random++ > 10000) random = 1;
 
                 return nextInterval;
             }
@@ -386,6 +403,16 @@ public class ThreadGroup extends AbstractExecutorService {
         }
     }
 
+    /**
+     * 给线程数量不进行变化池使用
+     */
+    ThreadProxy randomProxy() {
+        int hash = (int) Thread.currentThread().getId() + random;
+        return proxies[hash % amount];
+    }
+
+    ;
+
     final class ThreadProxy {
         final int index;
         private final ReentrantReadWriteLock.WriteLock writeLock;
@@ -444,13 +471,11 @@ public class ThreadGroup extends AbstractExecutorService {
                 if (_executor != null) {
                     amount--;
                     worker = null;
+                } else {
+                    return null;
                 }
             } finally {
                 lock.unlock();
-            }
-
-            if (_executor == null) {
-                return null;
             }
 
             if (isShutDownNow) {
