@@ -83,7 +83,9 @@ public class ThreadGroup extends AbstractExecutorService {
         }
     }
 
-
+    /**
+     * 以指定hash方式选择线程来执行task
+     */
     public void execute(int hash, Runnable task) {
         if (this.isBind) {
             /**
@@ -112,6 +114,7 @@ public class ThreadGroup extends AbstractExecutorService {
     volatile int random = 7;
 
     /**
+     * 随机算则线程来执行task
      * 此方法看来已经保证在同时发生shutdown时不会丢失任务
      */
     @Override

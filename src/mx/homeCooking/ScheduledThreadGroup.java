@@ -4,6 +4,10 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
+
+/**
+ * 绑定池就是所有方法都在最前面加一个hash参数
+ */
 public class ScheduledThreadGroup extends ThreadGroup implements TimeoutScheduledExecutorService {
 
     ScheduledThreadGroup(String groupName, int coreSize) {
