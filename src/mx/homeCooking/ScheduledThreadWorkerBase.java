@@ -28,6 +28,10 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
      */
     final Queue<Runnable> queue = new ConcurrentLinkedQueue();
 
+    public final Queue<Runnable> getQueue() {
+        return queue;
+    }
+
     /**
      * 超时队列中最小的时间
      */
@@ -37,21 +41,13 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
      */
     final ConcurrentSkipListMap<Long, ScheduleCommandNode> skipList = new ConcurrentSkipListMap();
 
-    final ConcurrentHashMap<Long,Void> scheduleMapLock = new ConcurrentHashMap(16);
+    final ConcurrentHashMap<Long, Void> scheduleMapLock = new ConcurrentHashMap(16);
 
     /**
-     *
      * @param name
-     * @param check
-     *
      */
-    ScheduledThreadWorkerBase(String name, Runnable check) {
+    ScheduledThreadWorkerBase(String name) {
         continueWorking = false;
-
-        this.check = check;
-        if(check!=null){
-
-        }
 
         thread = new Thread(worker);
         thread.setName(name);
@@ -67,17 +63,32 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
         }
     }
 
-    public ScheduledThreadWorkerBase(String name) {
-       this(name,null);
-    }
 
-    final Runnable check;
+    /**
+     * 1.普通线程池
+     * 2.调度线程池
+     * 3.自己check的普通线程池
+     * 4.自己check的调度线程池
+     * <p>
+     * check可以提供降级,即不再理会check
+     */
+    private volatile CheckRunnable checkRunnable;
+
+    /**
+     * 设置checkable
+     *
+     * @param checkRunnable
+     */
+    final void setCheckRunnable(CheckRunnable checkRunnable) {
+        this.checkRunnable = checkRunnable;
+    }
 
     private volatile boolean continueWorking;
 
     final Runnable worker = new Runnable() {
 
         ScheduleCommandNode scheduleTask;
+        long now;
 
         public void run() {
             /**
@@ -88,7 +99,7 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
             final AtomicLong md = minDate;
             final ConcurrentSkipListMap<Long, ScheduleCommandNode> sl = skipList;
             final AtomicLong consumerC = consumerCount;
-            final ConcurrentHashMap<Long,Void> lock =  scheduleMapLock;
+            final ConcurrentHashMap<Long, Void> lock = scheduleMapLock;
 
             continueWorking = true;
 
@@ -96,29 +107,25 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
              * working
              */
             while (continueWorking) {
-                long now = System.currentTimeMillis();
-
+                now = System.currentTimeMillis();
                 /**
                  * 下面是在线程池内部check的代码
                  */
-                if(1==2){
-                    /**
-                     * volatile field in check object
-                     */
-                    AtomicLong nextCheckTime = new AtomicLong(0);
-
+                CheckRunnable check = checkRunnable;
+                if (check != null) {
+                    AtomicLong nextCheckTime = check.nextCheckTime;
                     long _nextCheckTime = nextCheckTime.get();
-                    if(now > _nextCheckTime){
-                        if(nextCheckTime.compareAndSet(_nextCheckTime,Long.MAX_VALUE)){
+                    if (now >= _nextCheckTime) {
+                        if (nextCheckTime.compareAndSet(_nextCheckTime, Long.MAX_VALUE)) {
+                            long interval = 120;
                             try {
-                                check.run();
+                                interval = check.run();
                             } catch (Throwable e) {
                                 e.printStackTrace();
                             }
                             //重新取now值
                             now = System.currentTimeMillis();
-                            //120毫秒后继续
-                            nextCheckTime.set(now+120);
+                            nextCheckTime.set(now + interval);
                         }
                     }
                 }
@@ -142,16 +149,16 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
                     while (now >= firstDate) {
                         ScheduleCommandNode[] turnTask = new ScheduleCommandNode[1];
 
-                        lock.compute(firstDate,(d, v)->{
+                        lock.compute(firstDate, (d, v) -> {
                             //有极小的可能取出来是null
                             turnTask[0] = sl.remove(d);
                             return null;
                         });
 
                         if (scheduleTask != null) {
-                            scheduleTask.link( turnTask[0]);
-                        } else if ( turnTask[0] != null) {
-                            scheduleTask =  turnTask[0];
+                            scheduleTask.link(turnTask[0]);
+                        } else if (turnTask[0] != null) {
+                            scheduleTask = turnTask[0];
                         }
                         /**
                          * minDate设置为跳表中更大的那个值,然后可能又会被schedule方法改小
@@ -251,7 +258,7 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
             /**
              * shutdown
              */
-            List<Runnable> terminatedTask = (terminatedTaskSync == null) ? null : new ArrayList<>();
+            List<Runnable> terminatedTask = (terminatedTaskSync != null) ? new ArrayList<>() : null;
             for (; ; ) {
                 Runnable task = q.poll();
                 if (task != null) {
@@ -338,10 +345,10 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
         signal.setAndIncrementExecuteCount(commonTaskSignal);
     }
 
-    private class WithinRunnable implements Runnable{
+    private class CheckTimeoutRunnable implements Runnable {
         final Runnable command;
 
-        WithinRunnable(Runnable command) {
+        CheckTimeoutRunnable(Runnable command) {
             this.command = command;
         }
 
@@ -355,10 +362,10 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
                 e.printStackTrace();
             }
 
-            synchronized (this){
-                if(!hold){
+            synchronized (this) {
+                if (!hold) {
                     hold = true;
-                }else{
+                } else {
                     Thread.interrupted();
                 }
             }
@@ -367,8 +374,8 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
         /**
          * 对check线程的消耗很低
          */
-        public final synchronized void checkOvertime(){
-            if(!hold){
+        public final synchronized void checkTimeout() {
+            if (!hold) {
                 hold = true;
                 thread.interrupt();
             }
@@ -378,27 +385,27 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
     /**
      * 超过超时时间就interrupt
      * 还可以使用scheduleWithIn方法来代替这个方法并获得很好的业务性
+     *
      * @param command
-     * @param overTimeInMillions
-     * @param checkThread  一定是线程池之外的一个空闲线程,防止线程池中所有的线程都卡在任务上
+     * @param timeoutInMillions
+     * @param checkThread        一定是线程池之外的一个空闲线程,防止线程池中所有的线程都卡在任务上
      * @return
      */
-    public final void executeWithIn(Runnable command,long overTimeInMillions,ScheduledThreadWorkerBase checkThread){
+    public final void executeTimeout(Runnable command, long timeoutInMillions, ScheduledThreadWorkerBase checkThread) {
         if (checkThread == this) {
             throw new RuntimeException("cancel thread can't be self thread");
         }
-        WithinRunnable withinRunnable = new WithinRunnable(command);
+        CheckTimeoutRunnable withinRunnable = new CheckTimeoutRunnable(command);
         execute(withinRunnable::run);
-        checkThread.innerSchedule(withinRunnable::checkOvertime,overTimeInMillions);
+        checkThread.innerSchedule(withinRunnable::checkTimeout, timeoutInMillions);
     }
 
     /**
      * 不支持毫秒级以下的调度
      */
-    public final void innerSchedule(Runnable command, long delay, TimeUnit unit){
-        innerSchedule(command,unit.toMillis(delay));
+    public final void innerSchedule(Runnable command, long delay, TimeUnit unit) {
+        innerSchedule(command, unit.toMillis(delay));
     }
-
 
 
     /**
@@ -424,7 +431,7 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
              * 在集中状态下,仍然较慢,不过在正常业务情况下,延时是随机的,不可能出现集中情况
              * 或者在延时时加入随机数,以分散之
              */
-            scheduleMapLock.compute(thisDate,(d, v)->{
+            scheduleMapLock.compute(thisDate, (d, v) -> {
                 /**
                  * skipList有重复问题,现在以链表解决
                  * {@link ConcurrentSkipListMap#compute} JDK的注释:The function is NOT guaranteed to be applied once atomically.
@@ -534,12 +541,17 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
 
     private volatile SynchronousQueue<List<Runnable>> terminatedTaskSync = null;
 
-    @Override
-    public List<Runnable> shutdownNow() {
+
+    List<Runnable> shutdownNow(boolean waitForTerminate) {
         terminatedTaskSync = new SynchronousQueue<>();
         continueWorking = false;
         signal.set(shutDownSignal);
 
+        if (waitForTerminate)  return getTerminatedTask();
+        return null;
+    }
+
+    List<Runnable> getTerminatedTask(){
         try {
             /**
              * 等待结束
@@ -550,6 +562,12 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
         }
 
         return null;
+    }
+
+
+    @Override
+    public List<Runnable> shutdownNow() {
+        return shutdownNow(true);
     }
 
     @Override
@@ -564,7 +582,9 @@ class ScheduledThreadWorkerBase extends AbstractExecutorService {
         return terminationCDL.getCount() == 0;
     }
 
-
+    /**
+     * 如果不shutdown就调用这个方法是无意义的,会一直阻塞到超时
+     */
     @Override
     public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
         return terminationCDL.await(timeout, unit);

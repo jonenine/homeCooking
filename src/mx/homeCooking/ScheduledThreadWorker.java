@@ -10,10 +10,6 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements ScheduledExecutorService {
 
-    ScheduledThreadWorker(String name, Runnable check) {
-        super(name, check);
-    }
-
     public ScheduledThreadWorker(String name) {
         super(name);
     }
@@ -50,7 +46,7 @@ public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements 
         }, timeout, unit);
     }
 
-    final ScheduledFuture<?> toScheduleWithIn(Object command, boolean isCallable, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
+    final ScheduledFuture<?> toScheduleTimeout(Object command, boolean isCallable, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
         if (checkThread == this) {
             throw new RuntimeException("cancel thread can't be self thread");
         }
@@ -80,13 +76,13 @@ public class ScheduledThreadWorker extends ScheduledThreadWorkerBase implements 
     }
 
 
-    public ScheduledFuture<?> scheduleWithIn(Runnable command, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
-        return toScheduleWithIn(command, false, timeout, checkThread, delay, unit);
+    public ScheduledFuture<?> scheduleTimeout(Runnable command, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
+        return toScheduleTimeout(command, false, timeout, checkThread, delay, unit);
     }
 
 
-    public <V> ScheduledFuture<V> scheduleWithIn(Callable<V> callable, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
-        return (ScheduledFuture<V>) toScheduleWithIn(callable, true, timeout, checkThread, delay, unit);
+    public <V> ScheduledFuture<V> scheduleTimeout(Callable<V> callable, long timeout, ScheduledThreadWorkerBase checkThread, long delay, TimeUnit unit) {
+        return (ScheduledFuture<V>) toScheduleTimeout(callable, true, timeout, checkThread, delay, unit);
     }
 
 
