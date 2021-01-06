@@ -33,30 +33,30 @@ import java.util.stream.Stream;
  */
 public class ThreadGroup extends AbstractExecutorService {
 
-    final ThreadProxy[] proxies;
-    final int maxAmount;
+    private final ThreadProxy[] proxies;
+    private final int maxAmount;
     /**
      * 每次增加的线程数
      */
-    final int incrementNum;
-    final String groupName;
+    private final int incrementNum;
+    private final String groupName;
 
-    final boolean isBind;
-    final boolean isSchedule;
+    private final boolean isBind;
+    private final boolean isSchedule;
 
 
     /**
      * 当前线程数
      */
-    volatile int amount = 0;
+    private volatile int amount = 0;
 
     /**
      * @param groupName
      * @param coreSize
-     * @param isBind      是否是绑定池,绑定池是调度的,而且是Timeout池
-     * @param isSchedule  是否提供调度线程池的功能
+     * @param isBind     是否是绑定池,绑定池是调度的,而且是Timeout池
+     * @param isSchedule 是否提供调度线程池的功能,不一定支持timeout池,如果支持timeout需要独立的timeout线程
      */
-    public ThreadGroup(String groupName, int coreSize, boolean isBind, boolean isSchedule) {
+    ThreadGroup(String groupName, int coreSize, boolean isBind, boolean isSchedule) {
         this.groupName = groupName;
         maxAmount = coreSize;
         incrementNum = coreSize >= 100 ? 3 : (coreSize >= 30 ? 2 : 1);
@@ -69,6 +69,15 @@ public class ThreadGroup extends AbstractExecutorService {
             if (isBind || isSchedule) {
                 proxies[i].start(null);
             }
+        }
+
+        /**
+         * 初始化时启动checkable线程池
+         */
+        if (!isBind && !isSchedule) {
+            ScheduledThreadWorkerBase initCheckThread = new ScheduledThreadWorkerBase(groupName + "checker");
+            CheckRunnable checkrunnable = createCheckRunnable(initCheckThread);
+            initCheckThread.innerSchedule(checkrunnable::run, 60);
         }
     }
 
@@ -119,115 +128,171 @@ public class ThreadGroup extends AbstractExecutorService {
         proxies[0].start(task);
     }
 
-    final CheckRunnable checkRunnable = new CheckRunnable() {
+    final void clearCheckableToAllThread() {
+        for (int i = 0; i < maxAmount; i++) {
+            ScheduledThreadWorker worker = proxies[i].worker;
+            if (worker != null) {
+                worker.setCheckRunnable(null);
+            }
+        }
+    }
 
-        volatile long startLazyTime = 0;
-        volatile int queueSizeSum = 0;
+    final void setCheckableToAllThread(CheckRunnable checkRunnable) {
+        for (int i = 0; i < maxAmount; i++) {
+            ScheduledThreadWorker worker = proxies[i].worker;
+            if (worker != null) {
+                worker.setCheckRunnable(checkRunnable);
+            }
+        }
+    }
 
-        long check() {
-            //空闲的ThreadProxy
-            List<ThreadProxy> idleList = new ArrayList<>();
-            //不空闲的ThreadProxy
-            List<ThreadProxy> busyList = new ArrayList<>();
+    final CheckRunnable createCheckRunnable(ScheduledThreadWorkerBase initCheckThread) {
+        return new CheckRunnable() {
 
-            queueSizeSum = 0;
+            volatile long startLazyTime = 0;
+            volatile int queueSizeSum = 0;
+            volatile ScheduledThreadWorkerBase singleCheckThread = initCheckThread;
 
-            for (int i = 0; i < maxAmount; i++) {
-                ThreadProxy proxy = proxies[i];
-                int queueSize = proxy.tempQueueSize = proxy.queueSize(null);
-                if (queueSize == 0) {
-                    idleList.add(proxy);
+            @Override
+            long run() {
+                long nextInterval;
+                /**
+                 * 和下面的shutdown方法互斥
+                 */
+                synchronized (ThreadGroup.this) {
+                    if (alreadyShutDown) {
+                        //关闭checkThread
+                        ScheduledThreadWorkerBase singleThread = singleCheckThread;
+                        singleCheckThread = null;
+                        if(singleThread!=null){
+                            singleThread.shutdown();
+                        }
+                        //如果worker争抢执行,这里退出了不会再创建check线程,如果check线程执行,就没有下一次调度了
+                        return Long.MAX_VALUE;
+                    }
+                    //调用check业务
+                    nextInterval = check();
+                }
+
+                /**
+                 * 当线程池满时,让所有的worker自己进行check
+                 * 当不满时,使用一个独立的check线程池
+                 */
+                if (amount == maxAmount) {
+                    final ScheduledThreadWorkerBase singleThread = singleCheckThread;
+                    singleCheckThread = null;
+                    //在任务中1.shutdown独立的checkThead 2.对所有线程设置checkable,启动对checkable的争抢执行
+                    execute(() -> {
+                        singleThread.shutdown();
+                        setCheckableToAllThread(this);
+                    });
                 } else {
-                    busyList.add(proxy);
-                }
-
-                queueSizeSum += queueSize;
-            }
-
-            int _amount = amount;
-            /**
-             * 只要队列中的任务数比当前线程数大,就增加新线程,反之懒惰的减少线程
-             * 基本上,就是一下子就会压到最大值
-             */
-            if (queueSizeSum > _amount) {
-                if (_amount < maxAmount) {
-                    //每次最多新增incrementNum个新线程
-                    for (int i = 0; i < incrementNum; i++) {
-                        //下面的start会改变amount,所以这里重读
-                        _amount = amount;
-                        if (_amount < maxAmount) {
-                            ThreadProxy newProxy = proxies[_amount];
-                            //重复start不影响业务正确性
-                            newProxy.start();
-                        } else {
-                            break;
-                        }
+                    if (singleCheckThread == null) {
+                        //对所有线程清除checkable,改为在独立的运维线程中做check工作
+                        clearCheckableToAllThread();
+                        singleCheckThread = new ScheduledThreadWorkerBase(groupName + "checker");
                     }
                 }
 
-                //清空空闲状态
-                startLazyTime = 0;
-            } else {
-                //线程收缩主要在粘滞池的情况,采用普通线程,没有延迟任务
-                if (_amount > 0) {
-                    long currentTime = System.currentTimeMillis();
-                    if (startLazyTime == 0) {
-                        //设置空闲状态
-                        startLazyTime = currentTime;
+                if (singleCheckThread != null) {
+                    singleCheckThread.innerSchedule(this::run, nextInterval);
+                }
+
+                return nextInterval;
+            }
+
+            final long check() {
+                //空闲的ThreadProxy
+                List<ThreadProxy> idleList = new ArrayList<>();
+                //不空闲的ThreadProxy
+                List<ThreadProxy> busyList = new ArrayList<>();
+
+                queueSizeSum = 0;
+
+                for (int i = 0; i < maxAmount; i++) {
+                    ThreadProxy proxy = proxies[i];
+                    int queueSize = proxy.tempQueueSize = proxy.queueSize(null);
+                    if (queueSize == 0) {
+                        idleList.add(proxy);
                     } else {
-                        //空闲时,每隔一段时间消减一个线程
-                        if (currentTime - startLazyTime > 2000) {
-                            proxies[_amount - 1].stop(false);
-                            //清空空闲状态
-                            startLazyTime = 0;
+                        busyList.add(proxy);
+                    }
+
+                    queueSizeSum += queueSize;
+                }
+
+                int _amount = amount;
+                /**
+                 * 只要队列中的任务数比当前线程数大,就增加新线程,反之懒惰的减少线程
+                 * 基本上,就是一下子就会压到最大值
+                 */
+                if (queueSizeSum > _amount) {
+                    if (_amount < maxAmount) {
+                        //每次最多新增incrementNum个新线程
+                        for (int i = 0; i < incrementNum; i++) {
+                            //下面的start会改变amount,所以这里重读
+                            _amount = amount;
+                            if (_amount < maxAmount) {
+                                ThreadProxy newProxy = proxies[_amount];
+                                //重复start不影响业务正确性
+                                newProxy.start();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+
+                    //清空空闲状态
+                    startLazyTime = 0;
+                } else {
+                    //线程收缩主要在粘滞池的情况,采用普通线程,没有延迟任务
+                    if (_amount > 0) {
+                        long currentTime = System.currentTimeMillis();
+                        if (startLazyTime == 0) {
+                            //设置空闲状态
+                            startLazyTime = currentTime;
+                        } else {
+                            //空闲时,每隔一段时间消减一个线程
+                            if (currentTime - startLazyTime > 2000) {
+                                proxies[_amount - 1].stop(false);
+                                //清空空闲状态
+                                startLazyTime = 0;
+                            }
                         }
                     }
                 }
+
+                /**
+                 * 因为后添加的线程都是右边线程,所以左边的旧线程积累的任务通常较多
+                 * 所以在线程数达到最大之后,而且当某个线程队列一直为0的时候(意味着入队已经停止一段时间),开始重平衡的操作
+                 */
+                if (amount == maxAmount && !idleList.isEmpty()) {
+                    //按照上面取出的队列长度从大到小排序
+                    Collections.sort(busyList, new Comparator<ThreadProxy>() {
+                        @Override
+                        public int compare(ThreadProxy o1, ThreadProxy o2) {
+                            return o2.tempQueueSize - o1.tempQueueSize;
+                        }
+                    });
+                    for (int i = 0, l = busyList.size(); i < l; i++) {
+                        //忙的线程匹配闲的线程
+                        if (i < idleList.size()) {
+                            ThreadProxy idleWorker = idleList.get(i);
+                            ThreadProxy busyWorker = busyList.get(i);
+                            Runnable rebalanceTask = idleWorker.rebalanceTask(busyWorker.index, busyWorker.tempQueueSize);
+                            idleWorker.execute(rebalanceTask);
+                        }
+                    }//~for
+                }//~if
+
+                return amount == maxAmount ? 120 : 60;
             }
 
-            /**
-             * 因为后添加的线程都是右边线程,所以左边的旧线程积累的任务通常较多
-             * 所以在线程数达到最大之后,而且当某个线程队列一直为0的时候(意味着入队已经停止一段时间),开始重平衡的操作
-             */
-            if (amount == maxAmount && !idleList.isEmpty()) {
-                //按照上面取出的队列长度从大到小排序
-                Collections.sort(busyList, new Comparator<ThreadProxy>() {
-                    @Override
-                    public int compare(ThreadProxy o1, ThreadProxy o2) {
-                        return o2.tempQueueSize - o1.tempQueueSize;
-                    }
-                });
-                for (int i = 0, l = busyList.size(); i < l; i++) {
-                    //忙的线程匹配闲的线程
-                    if (i < idleList.size()) {
-                        ThreadProxy idleWorker = idleList.get(i);
-                        ThreadProxy busyWorker = busyList.get(i);
-                        Runnable rebalanceTask = idleWorker.rebalanceTask(busyWorker.index, busyWorker.tempQueueSize);
-                        idleWorker.execute(rebalanceTask);
-                    }
-                }//~for
-            }//~if
-
-            return amount == maxAmount ? 1000 : 60;
-        }
-
-        @Override
-        long run() {
-            /**
-             * 和下面的shutdown方法互斥
-             */
-            synchronized (ThreadGroup.this) {
-                if (alreadyShutDown || isBind) {
-                    return Long.MAX_VALUE;
-                }
-                return check();
-            }
-        }
-
-    };
+        };
+    }
 
 
-    volatile boolean alreadyShutDown = false;
+    private volatile boolean alreadyShutDown = false;
 
     /**
      * 这个方法不阻塞
@@ -235,7 +300,7 @@ public class ThreadGroup extends AbstractExecutorService {
      */
     Stream<ScheduledThreadWorker> toShutdown(boolean isShutdownNow) {
         List<ThreadProxy> reverseProxies = Arrays.asList(proxies);
-        //注意倒叙操作
+        //按照线程创建的顺序倒叙
         Collections.reverse(reverseProxies);
         terminatingWorker = reverseProxies.stream()
                 .map(proxy -> proxy.stop(isShutdownNow))
@@ -270,7 +335,7 @@ public class ThreadGroup extends AbstractExecutorService {
                 : null;
     }
 
-    volatile Stream<ScheduledThreadWorker> terminatingWorker;
+    private volatile Stream<ScheduledThreadWorker> terminatingWorker;
 
     @Override
     public boolean isShutdown() {
@@ -297,13 +362,20 @@ public class ThreadGroup extends AbstractExecutorService {
             return isTerminated();
         } else {
             InterruptedException[] es = new InterruptedException[1];
+            long[] remainTime = new long[]{unit.toMillis(timeout)};
+
             boolean re = terminatingWorker.allMatch(worker -> {
                 try {
-                    return worker.awaitTermination(timeout, unit);
+                    long start = System.currentTimeMillis();
+                    if (worker.awaitTermination(remainTime[0], TimeUnit.MILLISECONDS)) {
+                        remainTime[0] -= (System.currentTimeMillis() - start);
+                        return remainTime[0] > 0;
+                    }
                 } catch (InterruptedException e) {
                     es[0] = e;
-                    return false;
                 }
+
+                return false;
             });
 
             if (es[0] != null) {
@@ -326,13 +398,13 @@ public class ThreadGroup extends AbstractExecutorService {
             readLock = lock.readLock();
         }
 
-        volatile ScheduledThreadWorker executor;
+        volatile ScheduledThreadWorker worker;
 
         void start() {
             ReentrantReadWriteLock.WriteLock lock = writeLock;
             lock.lock();
             try {
-                if (executor == null) {
+                if (worker == null) {
                     /**
                      * 会不会和shutdown流程冲突
                      * 这里和stop互斥,进入这里意味着肯定已经stop(在stop之前进入什么都不做)
@@ -341,7 +413,7 @@ public class ThreadGroup extends AbstractExecutorService {
                     if (alreadyShutDown) {
                         throw new RejectedExecutionException();
                     }
-                    executor = new ScheduledThreadWorker(groupName + "-" + index);
+                    worker = new ScheduledThreadWorker(groupName + "-" + index);
                     amount++;
                 }
             } finally {
@@ -368,10 +440,10 @@ public class ThreadGroup extends AbstractExecutorService {
             ReentrantReadWriteLock.WriteLock lock = writeLock;
             lock.lock();
             try {
-                _executor = executor;
+                _executor = worker;
                 if (_executor != null) {
                     amount--;
-                    executor = null;
+                    worker = null;
                 }
             } finally {
                 lock.unlock();
@@ -397,7 +469,7 @@ public class ThreadGroup extends AbstractExecutorService {
             ReentrantReadWriteLock.ReadLock lock = readLock;
             lock.lock();
             try {
-                ScheduledThreadWorker _executor = executor;
+                ScheduledThreadWorker _executor = worker;
                 if (_executor != null) {
                     try {
                         _executor.execute(task);
@@ -439,7 +511,7 @@ public class ThreadGroup extends AbstractExecutorService {
         }
 
         int queueSize(ScheduledThreadWorker _executor) {
-            _executor = _executor != null ? _executor : executor;
+            _executor = _executor != null ? _executor : worker;
             if (_executor != null) {
                 return _executor.size();
             }
@@ -448,7 +520,7 @@ public class ThreadGroup extends AbstractExecutorService {
         }
 
         Queue getTaskQueue() {
-            final ScheduledThreadWorker _executor = executor;
+            final ScheduledThreadWorker _executor = worker;
             if (_executor != null) {
                 return _executor.getQueue();
             }
@@ -456,9 +528,21 @@ public class ThreadGroup extends AbstractExecutorService {
             return null;
         }
 
-        ScheduledThreadWorker getExecutor() {
-            return executor;
+        ScheduledThreadWorker getWorker() {
+            return worker;
         }
+    }
+
+    public static void main(String[] args) {
+        List<Boolean> aa = new ArrayList<>();
+        aa.add(true);
+        aa.add(true);
+        aa.add(true);
+
+        for (int i = 0; i < 10; i++) {
+            System.err.println(aa.stream().allMatch(b -> b));
+        }
+
     }
 
 }
