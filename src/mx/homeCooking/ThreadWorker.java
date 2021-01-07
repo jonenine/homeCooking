@@ -1,9 +1,6 @@
 package mx.homeCooking;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Queue;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
@@ -116,13 +113,9 @@ class ThreadWorker extends AbstractExecutorService {
                     AtomicLong nextCheckTime = check.nextCheckTime;
                     long _nextCheckTime = nextCheckTime.get();
                     if (now >= _nextCheckTime) {
+                        //这里形成争抢执行
                         if (nextCheckTime.compareAndSet(_nextCheckTime, Long.MAX_VALUE)) {
-                            long interval = 120;
-                            try {
-                                interval = check.run();
-                            } catch (Throwable e) {
-                                e.printStackTrace();
-                            }
+                            long interval = check.run();
                             //重新取now值
                             now = System.currentTimeMillis();
                             nextCheckTime.set(now + interval);
@@ -224,15 +217,15 @@ class ThreadWorker extends AbstractExecutorService {
                                     break;
                                 }
 
-                                if (signal.is(state, commonTaskSignal)) {
+                                if (signal.is(state, shutDownSignal)) {
+                                    /**
+                                     * 退出
+                                     */
+                                    break;
+                                } else if (signal.is(state, commonTaskSignal)) {
                                     /**
                                      * 有普通任务添加过来了,注意要先判断1,再判断2
                                      * 普通任务相当于延迟是0的调度,优先级更高
-                                     */
-                                    break;
-                                } else if (signal.is(state, shutDownSignal)) {
-                                    /**
-                                     * 退出
                                      */
                                     break;
                                 } else if (signal.is(state, scheduleTaskSignal)) {
@@ -258,7 +251,7 @@ class ThreadWorker extends AbstractExecutorService {
             /**
              * shutdown
              */
-            List<Runnable> terminatedTask = (terminatedTaskSync != null) ? new ArrayList<>() : null;
+            List<Runnable> terminatedTask = (terminatedTasks != null) ? new ArrayList<>() : null;
             for (; ; ) {
                 Runnable task = q.poll();
                 if (task != null) {
@@ -281,12 +274,8 @@ class ThreadWorker extends AbstractExecutorService {
                 }
             }
 
-            if (terminatedTaskSync != null) {
-                try {
-                    terminatedTaskSync.put(terminatedTask);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
+            if (terminatedTasks != null) {
+                terminatedTasks.offer(terminatedTask);
             }
 
             /**
@@ -310,7 +299,7 @@ class ThreadWorker extends AbstractExecutorService {
          * 取size的时候再计算最终值
          * 防止生产和消费互相锁定
          */
-        int size = (int) (signal.pollExecuteCount() - consumerCount.get());
+        int size = (int) (signal.executeCount - consumerCount.get());
 
         return size < 0 ? 0 : size;
     }
@@ -388,7 +377,7 @@ class ThreadWorker extends AbstractExecutorService {
      *
      * @param command
      * @param timeoutInMillions
-     * @param checkThread        一定是线程池之外的一个空闲线程,防止线程池中所有的线程都卡在任务上
+     * @param checkThread       一定是线程池之外的一个空闲线程,防止线程池中所有的线程都卡在任务上
      * @return
      */
     public final void executeTimeout(Runnable command, long timeoutInMillions, ThreadWorker checkThread) {
@@ -530,7 +519,13 @@ class ThreadWorker extends AbstractExecutorService {
 
     @Override
     public void shutdown() {
-        continueWorking = false;
+        synchronized (this) {
+            if (continueWorking == true) {
+                continueWorking = false;
+            } else {
+                return;
+            }
+        }
         /**
          * worker只在一个地方take(clear)
          * 意味着只要写入了shutDownSignal,就一定会在空闲时signal,worker中业务会进入第一个while中,而此时continueWorking已经为false
@@ -539,29 +534,36 @@ class ThreadWorker extends AbstractExecutorService {
         signal.set(shutDownSignal);
     }
 
-    private volatile SynchronousQueue<List<Runnable>> terminatedTaskSync = null;
-
+    private volatile BlockingQueue<List<Runnable>> terminatedTasks = null;
 
     List<Runnable> shutdownNow(boolean waitForTerminate) {
-        terminatedTaskSync = new SynchronousQueue<>();
-        continueWorking = false;
+        synchronized (this) {
+            if (continueWorking == true) {
+                //设置terminatedTasks一定要在设置continueWorking前面
+                terminatedTasks = new ArrayBlockingQueue<>(1);
+                continueWorking = false;
+            } else {
+                return null;
+            }
+        }
+
         signal.set(shutDownSignal);
 
-        if (waitForTerminate)  return getTerminatedTask();
+        if (waitForTerminate) return getTerminatedTask();
         return null;
     }
 
-    List<Runnable> getTerminatedTask(){
+    List<Runnable> getTerminatedTask() {
         try {
             /**
              * 等待结束
              */
-            return terminatedTaskSync.take();
+            return terminatedTasks.take();
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
 
-        return null;
+        return Collections.emptyList();
     }
 
 
@@ -636,7 +638,7 @@ class ThreadWorker extends AbstractExecutorService {
             }
         }
 
-        long executeCount;
+        volatile long executeCount;
 
         /**
          * 增加一个具有count的功能的set方法
@@ -656,15 +658,6 @@ class ThreadWorker extends AbstractExecutorService {
             }
         }
 
-        long pollExecuteCount() {
-            final ReentrantLock l = lock;
-            l.lock();
-            try {
-                return executeCount;
-            } finally {
-                l.unlock();
-            }
-        }
 
         /**
          * await之后会清除state,准备好下次的set
