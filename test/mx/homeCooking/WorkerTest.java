@@ -2,10 +2,7 @@ package mx.homeCooking;
 
 import org.junit.Test;
 
-import java.util.ArrayList;
-import java.util.BitSet;
-import java.util.Date;
-import java.util.Random;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -13,11 +10,11 @@ import java.util.function.Function;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 
-public class ThreadWorkerTest {
+public class WorkerTest {
 
     public static void main(String[] args) {
         try {
-            ThreadWorkerTest tester = new ThreadWorkerTest();
+            WorkerTest tester = new WorkerTest();
             tester.warmUp();
             for (int i = 0; i < 10; i++) {
                 tester.testPerformance();
@@ -33,7 +30,7 @@ public class ThreadWorkerTest {
      */
     public void warmUp() throws Exception {
         //ExecutorService threadWorker = new ThreadWorker("test0");
-        ExecutorService threadWorker = new ScheduledThreadWorker("test1");
+        ExecutorService threadWorker = new ThreadWorker("test1");
 
         final AtomicInteger counter = new AtomicInteger(0);
         final CountDownLatch cdl = new CountDownLatch(1);
@@ -56,12 +53,14 @@ public class ThreadWorkerTest {
         System.out.println("warmUp threadWorker已经销毁:" + threadWorker.shutdownNow());
     }
 
+
+    final ThreadLocal<Boolean> shutdownLocal = new ThreadLocal<>();
     /**
      * 测试shutDown,以及shutdown后处理遗留任务
      */
     @Test
     public void testShutDown() throws Exception {
-        ScheduledThreadWorker threadWorker = new ScheduledThreadWorker("test1");
+        ThreadWorker threadWorker = new ThreadWorker("test1");
 
         final AtomicInteger counter = new AtomicInteger(0);
         final int sum = 1000000;
@@ -86,7 +85,14 @@ public class ThreadWorkerTest {
         }
 
         try {
-            threadWorker.shutdown();
+            Boolean isShutdownNow = shutdownLocal.get();
+            if(isShutdownNow==null || !isShutdownNow){
+                threadWorker.shutdown();
+            }else {
+                List<Runnable> terminatedTasks = threadWorker.shutdownNow();
+                System.out.println("shutdownNow后剩余任务数"+terminatedTasks.size());
+            }
+
             /**
              * 测试shutdown后添加任务
              */
@@ -102,11 +108,19 @@ public class ThreadWorkerTest {
         //剩余任务数
         int remain = threadWorker.size();
 
-        System.out.println("当前消费" + count + "/" + remain + "/" + (count + remain));
+        System.out.println("当前消费:" + count + "/剩余:" + remain + "/消费+剩余:" + (count + remain));
         while (threadWorker.getThread().isAlive()) {
 
         }
         System.err.println(threadWorker.size());
+    }
+
+    @Test
+    public void testShutDownNowManyTimes() throws Exception{
+        shutdownLocal.set(true);
+        for (int i = 0; i < 1000; i++) {
+            testShutDown();
+        }
     }
 
     @Test
@@ -130,7 +144,7 @@ public class ThreadWorkerTest {
         for (int i = 0; i < 4; i++) {
             final int ii = i;
             new Thread(new Runnable() {
-                ScheduledThreadWorker threadWorker = new ScheduledThreadWorker("test" + ii);
+                ThreadWorker threadWorker = new ThreadWorker("test" + ii);
                 AtomicInteger batchCount = new AtomicInteger(0);
 
                 @Override
@@ -182,7 +196,7 @@ public class ThreadWorkerTest {
      */
     @Test
     public void testSchedule() {
-        ScheduledThreadWorker threadWorker = new ScheduledThreadWorker("test1");
+        ThreadWorker threadWorker = new ThreadWorker("test1");
 
         new Thread(() -> {
             while (true) {
@@ -207,7 +221,7 @@ public class ThreadWorkerTest {
                 //时间上也要随机,定时不能总是原来越大,也要相应变小
                 final long delay = 10 + ii / 100 - (int) (10 * r.nextFloat());
                 final long date = System.currentTimeMillis() + delay;
-                threadWorker.schedule(() -> {
+                threadWorker.innerSchedule(() -> {
                     long late = System.currentTimeMillis() - date;
                     if (Math.abs(late) > 50) {
                         System.err.println("调度误差超过50毫秒:" + late);
@@ -259,7 +273,7 @@ public class ThreadWorkerTest {
         int productThreadSum = 8;
         int taskSum = 300000;
 
-        ScheduledThreadWorker threadWorker = new ScheduledThreadWorker("test1");
+        ThreadWorker threadWorker = new ThreadWorker("test1");
         //ScheduledThreadPoolExecutor threadWorker = new ScheduledThreadPoolExecutor(1);
 
         CountDownLatch[] allCdl = new CountDownLatch[1];
@@ -309,7 +323,7 @@ public class ThreadWorkerTest {
                         /**
                          * 添加任务
                          */
-                        threadWorker.schedule(() -> {
+                        threadWorker.innerSchedule(() -> {
                             long late = System.currentTimeMillis() - date;
                             if (Math.abs(late) > 50) {
                                 misCounter.incrementAndGet();
@@ -369,7 +383,7 @@ public class ThreadWorkerTest {
      */
     @Test
     public void testScheduleFromMT2() {
-        ScheduledThreadWorker threadWorker = new ScheduledThreadWorker("test1");
+        ThreadWorker threadWorker = new ThreadWorker("test1");
 
         int productThreadSum = 8;
         ExecutorService executor = Executors.newFixedThreadPool(productThreadSum);
@@ -392,7 +406,7 @@ public class ThreadWorkerTest {
                 /**
                  * 添加任务
                  */
-                threadWorker.schedule(() -> {
+                threadWorker.innerSchedule(() -> {
                     long late = System.currentTimeMillis() - date;
                     /**
                      * 调度误差超过50毫秒的就记录下来
@@ -464,7 +478,7 @@ public class ThreadWorkerTest {
     public void testPerformance() throws Exception {
         //ExecutorService threadWorker = new ThreadWorker("test1");
         //ExecutorService threadWorker = Executors.newFixedThreadPool(1);
-        ExecutorService threadWorker = new ScheduledThreadWorker("test1");
+        ExecutorService threadWorker = new ThreadWorker("test1");
 
         int producerSum = 10;
         final CountDownLatch cdl = new CountDownLatch(producerSum);
