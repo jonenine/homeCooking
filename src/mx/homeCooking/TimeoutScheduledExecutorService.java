@@ -6,7 +6,7 @@ import java.util.concurrent.TimeUnit;
 
 public interface TimeoutScheduledExecutorService extends  ScheduledExecutorService {
 
-    void executeTimeout(Runnable command, long timeoutInMillions);
+    void executeTimeout(Runnable command,  long delay, TimeUnit unit);
 
     TaskFuture<?> scheduleTimeout(Runnable command, long timeout, long delay, TimeUnit unit);
 

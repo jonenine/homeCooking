@@ -35,8 +35,8 @@ public class ScheduledWorkerGroup extends WorkerGroup implements TimeoutSchedule
     }
 
     @Override
-    public void executeTimeout(Runnable command, long timeoutInMillions) {
-        randomProxy().worker.executeTimeout(command, timeoutInMillions, maintainThread);
+    public void executeTimeout(Runnable command, long delay, TimeUnit unit) {
+        randomProxy().worker.executeTimeout(command, unit.toMillis(delay), maintainThread);
     }
 
     @Override

@@ -1,5 +1,7 @@
 package mx.homeCooking;
 
+import sun.reflect.generics.reflectiveObjects.NotImplementedException;
+
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -43,6 +45,20 @@ public class WorkerGroup extends AbstractExecutorService {
 
     private final boolean isBind;
     private final boolean isSchedule;
+    /**
+     * 是否要切换check thread
+     */
+    private final boolean changeCheckThread;
+
+    boolean isChangeCheckThread() {
+        return !isBind && !isSchedule;
+    }
+
+    /**
+     * 线程数量是否伸缩
+     */
+    private final boolean shrinkThreadPool;
+
 
     /**
      * 当前线程数
@@ -50,6 +66,7 @@ public class WorkerGroup extends AbstractExecutorService {
     private volatile int amount = 0;
 
     protected ThreadWorker maintainThread;
+
 
     /**
      * @param groupName
@@ -64,11 +81,13 @@ public class WorkerGroup extends AbstractExecutorService {
         this.isBind = isBind;
         this.isSchedule = isSchedule;
         proxies = new ThreadProxy[coreSize];
+        this.changeCheckThread = isChangeCheckThread();
+        this.shrinkThreadPool = !isBind && !isSchedule;
 
         for (int i = 0; i < coreSize; i++) {
             proxies[i] = new ThreadProxy(i);
             if (isBind || isSchedule) {
-                proxies[i].start(null);
+                proxies[i].start();
             }
         }
 
@@ -76,19 +95,19 @@ public class WorkerGroup extends AbstractExecutorService {
          * bind池用来timeout
          * schedule池和普通池用来check和timeout
          */
-        maintainThread = new ThreadWorker(groupName + "checker");
+        maintainThread = new ThreadWorker(groupName + "-checker");
         /**
          * 绑定池不用做维护
          */
         if (!isBind) {
-            maintainThread.innerSchedule(createCheckRunnable()::run, 60);
+            maintainThread.innerSchedule(shrinkAndChangeRunnable()::run, 60);
         }
     }
 
     /**
      * 以指定hash方式选择线程来执行task
      */
-    public void execute(int hash, Runnable task) {
+    void execute(int hash, Runnable task) {
         if (this.isBind) {
             /**
              * 幂等性模式下,实际是绑定线程消费,即对某个key而言,其对应的线程是不变的
@@ -117,10 +136,12 @@ public class WorkerGroup extends AbstractExecutorService {
 
     /**
      * 随机算则线程来执行task
-     * 此方法看来已经保证在同时发生shutdown时不会丢失任务
+     * 在threadAmountAdjust时,因为proxy的execute和stop之间是互斥的,此方法保证在同时发生shutdown时不会丢失任务
+     * 在非threadAmountAdjust时,再shutdown同时execute成功一个任务,这个任务可能不会被执行或terminate,造成此任务会丢失
+     * 在需要shutdown的场合,shutdown需要和execute同步
      */
     @Override
-    public void execute(Runnable task) {
+    public final void execute(Runnable task) {
         int hash = (int) Thread.currentThread().getId() + random;
         int _mount = amount;
         while (_mount > 0) {
@@ -139,13 +160,33 @@ public class WorkerGroup extends AbstractExecutorService {
         proxies[0].start(task);
     }
 
-    final void clearCheckableToAllThread() {
-        for (int i = 0; i < maxAmount; i++) {
-            ScheduledThreadWorker worker = proxies[i].worker;
-            if (worker != null) {
-                worker.setCheckRunnable(null);
+    /**
+     * 支持超时操作
+     * 为了提高性能,代码冗余较多
+     */
+    public void executeTimeout(Runnable command,  long delay, TimeUnit unit) {
+        long timeoutInMillions = unit.toMillis(delay);
+
+        int hash = (int) Thread.currentThread().getId() + random;
+        int _mount = amount;
+        while (_mount > 0) {
+            /**
+             * 如果proxy已经stop了,就再次分配
+             */
+            if (proxies[hash % _mount].executeTimeout(command,timeoutInMillions)) {
+                return;
             }
+            _mount--;
         }
+
+        /**
+         * 启动线程0来执行任务
+         */
+        proxies[0].startTimeout(command,timeoutInMillions);
+    }
+
+    final void clearCheckableToAllThread() {
+        setCheckableToAllThread(null);
     }
 
     final void setCheckableToAllThread(CheckRunnable checkRunnable) {
@@ -157,7 +198,7 @@ public class WorkerGroup extends AbstractExecutorService {
         }
     }
 
-    final CheckRunnable createCheckRunnable() {
+    final CheckRunnable shrinkAndChangeRunnable() {
         return new CheckRunnable() {
 
             volatile long startLazyTime = 0;
@@ -188,13 +229,9 @@ public class WorkerGroup extends AbstractExecutorService {
                     nextInterval = check();
                 }
 
-
                 boolean changeToSingleCheckThread = false;
 
-                /**
-                 * 只有普通池才会切换维护线程池
-                 */
-                if (!isSchedule) {
+                if (changeCheckThread) {
                     /**
                      * 当线程池满时,让所有的worker自己进行check
                      * 当不满时,使用一个独立的check线程池
@@ -216,12 +253,11 @@ public class WorkerGroup extends AbstractExecutorService {
                         if (singleCheckThread == null) {
                             //对所有线程清除checkable,改为在独立的运维线程中做check工作
                             clearCheckableToAllThread();
-                            singleCheckThread = new ThreadWorker(groupName + "checker");
+                            singleCheckThread = new ThreadWorker(groupName + "-checker");
                             changeToSingleCheckThread = true;
                         }
                     }
                 }
-
 
                 if (singleCheckThread != null) {
                     singleCheckThread.innerSchedule(this::run, nextInterval);
@@ -258,40 +294,43 @@ public class WorkerGroup extends AbstractExecutorService {
                 }
 
                 int _amount = amount;
-                /**
-                 * 只要队列中的任务数比当前线程数大,就增加新线程,反之懒惰的减少线程
-                 * 基本上,就是一下子就会压到最大值
-                 */
-                if (queueSizeSum > _amount) {
-                    if (_amount < maxAmount) {
-                        //每次最多新增incrementNum个新线程
-                        for (int i = 0; i < incrementNum; i++) {
-                            //下面的start会改变amount,所以这里重读
-                            _amount = amount;
-                            if (_amount < maxAmount) {
-                                ThreadProxy newProxy = proxies[_amount];
-                                //重复start不影响业务正确性
-                                newProxy.start();
-                            } else {
-                                break;
+
+                if (shrinkThreadPool) {
+                    /**
+                     * 只要队列中的任务数比当前线程数大,就增加新线程,反之懒惰的减少线程
+                     * 基本上,就是一下子就会压到最大值
+                     */
+                    if (queueSizeSum > _amount) {
+                        if (_amount < maxAmount) {
+                            //每次最多新增incrementNum个新线程
+                            for (int i = 0; i < incrementNum; i++) {
+                                //下面的start会改变amount,所以这里重读
+                                _amount = amount;
+                                if (_amount < maxAmount) {
+                                    ThreadProxy newProxy = proxies[_amount];
+                                    //重复start不影响业务正确性
+                                    newProxy.start();
+                                } else {
+                                    break;
+                                }
                             }
                         }
-                    }
 
-                    //清空空闲状态
-                    startLazyTime = 0;
-                } else {
-                    if (_amount > 0) {
-                        long currentTime = System.currentTimeMillis();
-                        if (startLazyTime == 0) {
-                            //设置空闲状态
-                            startLazyTime = currentTime;
-                        } else {
-                            //空闲时,每隔一段时间消减一个线程
-                            if (currentTime - startLazyTime > 2000) {
-                                proxies[_amount - 1].stop(false);
-                                //清空空闲状态
-                                startLazyTime = 0;
+                        //清空空闲状态
+                        startLazyTime = 0;
+                    } else {
+                        if (_amount > 0) {
+                            long currentTime = System.currentTimeMillis();
+                            if (startLazyTime == 0) {
+                                //设置空闲状态
+                                startLazyTime = currentTime;
+                            } else {
+                                //空闲时,每隔一段时间消减一个线程
+                                if (currentTime - startLazyTime > 2000) {
+                                    proxies[_amount - 1].stop(false);
+                                    //清空空闲状态
+                                    startLazyTime = 0;
+                                }
                             }
                         }
                     }
@@ -320,7 +359,7 @@ public class WorkerGroup extends AbstractExecutorService {
                     }//~for
                 }//~if
 
-                return amount == maxAmount ? 120 : 60;
+                return amount == maxAmount ? 200 : 60;
             }
 
         };
@@ -356,7 +395,7 @@ public class WorkerGroup extends AbstractExecutorService {
             firstCall = true;
         }
 
-        if(firstCall){
+        if (firstCall) {
             terminatingWorker.count();
         }
     }
@@ -428,12 +467,15 @@ public class WorkerGroup extends AbstractExecutorService {
     }
 
     /**
-     * 给线程数量不进行变化池使用
+     * 主要是给线程数量不进行变化池使用,比如非绑定调度池,因为调度任务没有重平均,所以采用随机数来分配线程,这样会降低入队性能
+     * 在各业务中调度任务相对较少
      */
     ThreadProxy randomProxy() {
-        //todo:这里可以采用不同的均匀策略,比如当前时间什么的
-        int hash = (int) Thread.currentThread().getId() + random;
-        return proxies[hash % amount];
+        if (isBind || isSchedule) {
+            int hash = ThreadLocalRandom.current().nextInt(4096);
+            return proxies[hash % maxAmount];
+        }
+        return null;
     }
 
     /**
@@ -454,7 +496,7 @@ public class WorkerGroup extends AbstractExecutorService {
         volatile ScheduledThreadWorker worker;
 
         void start() {
-            ReentrantReadWriteLock.WriteLock lock = writeLock;
+            final ReentrantReadWriteLock.WriteLock lock = writeLock;
             lock.lock();
             try {
                 if (worker == null) {
@@ -484,13 +526,19 @@ public class WorkerGroup extends AbstractExecutorService {
             }
         }
 
+        void startTimeout(Runnable task, long timeoutInMillions) {
+            while (!executeTimeout(task, timeoutInMillions)) {
+                start();
+            }
+        }
+
         /**
          *
          */
         ScheduledThreadWorker stop(boolean isShutDownNow) {
             ScheduledThreadWorker _executor;
 
-            ReentrantReadWriteLock.WriteLock lock = writeLock;
+            final ReentrantReadWriteLock.WriteLock lock = writeLock;
             lock.lock();
             try {
                 _executor = worker;
@@ -511,7 +559,6 @@ public class WorkerGroup extends AbstractExecutorService {
             }
 
 
-
             return _executor;
         }
 
@@ -519,8 +566,8 @@ public class WorkerGroup extends AbstractExecutorService {
          * 如果内部的线程池已经或正在销毁,就返回false
          */
         boolean execute(Runnable task) {
-            ReentrantReadWriteLock.ReadLock lock = readLock;
-            lock.lock();
+            final ReentrantReadWriteLock.ReadLock lock = readLock;
+            if (shrinkThreadPool) lock.lock();
             try {
                 ScheduledThreadWorker _executor = worker;
                 if (_executor != null) {
@@ -534,7 +581,27 @@ public class WorkerGroup extends AbstractExecutorService {
 
                 return false;
             } finally {
-                lock.unlock();
+                if (shrinkThreadPool) lock.unlock();
+            }
+        }
+
+        boolean executeTimeout(Runnable task, long timeoutInMillions) {
+            final ReentrantReadWriteLock.ReadLock lock = readLock;
+            if (shrinkThreadPool) lock.lock();
+            try {
+                ScheduledThreadWorker _executor = worker;
+                if (_executor != null) {
+                    try {
+                        _executor.executeTimeout(task, timeoutInMillions, maintainThread);
+                        return true;
+                    } catch (RejectedExecutionException e) {
+                        e.printStackTrace();
+                    }
+                }
+
+                return false;
+            } finally {
+                if (shrinkThreadPool) lock.unlock();
             }
         }
 
@@ -548,11 +615,11 @@ public class WorkerGroup extends AbstractExecutorService {
              * 直接分担繁忙线程一半的任务给自己
              */
             return () -> {
-                ThreadProxy busy = proxies[busyIndex];
+                Queue formQueue = proxies[busyIndex].getTaskQueue();
+                if (formQueue == null) return;
                 //从繁忙线程分担的任务数
-                int shareSize = busyQueueSize / 2;
+                int shareSize = Math.round(busyQueueSize / 2f);
 
-                Queue formQueue = busy.getTaskQueue();
                 Queue toQueue = getTaskQueue();
                 while (--shareSize > 0) {
                     Runnable task = (Runnable) formQueue.poll();
@@ -572,7 +639,7 @@ public class WorkerGroup extends AbstractExecutorService {
         int queueSize() {
             ScheduledThreadWorker _worker = worker;
             if (_worker != null) {
-                return _worker.size();
+                return _worker.getQueueSize();
             }
 
             return 0;
@@ -593,18 +660,8 @@ public class WorkerGroup extends AbstractExecutorService {
     }
 
     public static void main(String[] args) {
-        List<Boolean> aa = new ArrayList<>();
-        aa.add(false);
-        aa.add(true);
-        aa.add(true);
-
         for (int i = 0; i < 10; i++) {
-            System.err.println(aa.stream().allMatch(b -> {
-                System.err.println("-----"+Thread.currentThread().getId());
-                return b;
-            }));
         }
-
     }
 
 }

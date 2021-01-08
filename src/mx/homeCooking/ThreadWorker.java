@@ -1,5 +1,7 @@
 package mx.homeCooking;
 
+import sun.reflect.generics.reflectiveObjects.NotImplementedException;
+
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -87,16 +89,47 @@ class ThreadWorker extends AbstractExecutorService {
         ScheduleCommandNode scheduleTask;
         long now;
 
-        public void run() {
+        /**
+         * 收集到时的定时任务
+         */
+        private final long fetchScheduleTasks(long firstDate) {
+            final ConcurrentSkipListMap<Long, ScheduleCommandNode> sl = skipList;
+            /**
+             * 将所有到点的定时任务都取出,合并在一起
+             */
+            while (now >= firstDate) {
+                ScheduleCommandNode[] turnTask = new ScheduleCommandNode[1];
+                //todo:减少下面这个匿名对象可能还能再优化,不过就这样吧
+                scheduleMapLock.compute(firstDate, (d, v) -> {
+                    //有极小的可能取出来是null
+                    turnTask[0] = sl.remove(d);
+                    return null;
+                });
+
+                if (scheduleTask != null) {
+                    scheduleTask.link(turnTask[0]);
+                } else if (turnTask[0] != null) {
+                    scheduleTask = turnTask[0];
+                }
+                /**
+                 * minDate设置为跳表中更大的那个值,然后可能又会被schedule方法改小
+                 * 但下次working循环永远取出最小值
+                 */
+                Map.Entry<Long, ScheduleCommandNode> firstEntry = sl.firstEntry();
+                firstDate = (firstEntry == null) ? Long.MAX_VALUE : firstEntry.getKey();
+            }
+
+            return firstDate;
+        }
+
+        public final void run() {
             /**
              * starting
              * 将一些对象引用拷贝到方法内部变量,提高访问速度
              */
             final Queue<Runnable> q = queue;
             final AtomicLong md = minDate;
-            final ConcurrentSkipListMap<Long, ScheduleCommandNode> sl = skipList;
             final AtomicLong consumerC = consumerCount;
-            final ConcurrentHashMap<Long, Void> lock = scheduleMapLock;
 
             continueWorking = true;
 
@@ -128,41 +161,7 @@ class ThreadWorker extends AbstractExecutorService {
                  */
                 scheduleTask = null;
 
-                /**
-                 * 下面这个自旋锁会因为生产端插入更小值而重新计算
-                 * 但重新执行回调里面的业务代码仍然不影响业务的正确性
-                 * 如果真的发生这种情况,重算会使更近的任务也被link进来
-                 *
-                 * 这里可能会因为阻塞时间过长而影响入队,但作为绑定线程模式消费就不受影响了
-                 */
-                md.updateAndGet(firstDate -> {
-                    /**
-                     * 将所有到点的定时任务都取出,合并在一起
-                     */
-                    while (now >= firstDate) {
-                        ScheduleCommandNode[] turnTask = new ScheduleCommandNode[1];
-
-                        lock.compute(firstDate, (d, v) -> {
-                            //有极小的可能取出来是null
-                            turnTask[0] = sl.remove(d);
-                            return null;
-                        });
-
-                        if (scheduleTask != null) {
-                            scheduleTask.link(turnTask[0]);
-                        } else if (turnTask[0] != null) {
-                            scheduleTask = turnTask[0];
-                        }
-                        /**
-                         * minDate设置为跳表中更大的那个值,然后可能又会被schedule方法改小
-                         * 但下次working循环永远取出最小值
-                         */
-                        Map.Entry<Long, ScheduleCommandNode> firstEntry = sl.firstEntry();
-                        firstDate = (firstEntry == null) ? Long.MAX_VALUE : firstEntry.getKey();
-                    }
-
-                    return firstDate;
-                });
+                md.updateAndGet(this::fetchScheduleTasks);
 
                 if (scheduleTask != null) {
                     scheduleTask.run();
@@ -294,7 +293,7 @@ class ThreadWorker extends AbstractExecutorService {
      * 线程池中缓存的,还没有完成的任务数.传统线程池的size表示的是队列中的任务数
      * 提供快速取size
      */
-    public int size() {
+    public final int getQueueSize() {
         /**
          * 取size的时候再计算最终值
          * 防止生产和消费互相锁定
@@ -302,6 +301,13 @@ class ThreadWorker extends AbstractExecutorService {
         int size = (int) (signal.executeCount - consumerCount.get());
 
         return size < 0 ? 0 : size;
+    }
+
+    /**
+     * 判断是否空闲
+     */
+    public final boolean isIdle() {
+        return getQueueSize() == 0 && thread.getState() == Thread.State.TIMED_WAITING;
     }
 
 
@@ -322,6 +328,7 @@ class ThreadWorker extends AbstractExecutorService {
          * (2)shutdown
          * (3)worker线程结束
          * (4)再运行下面的代码
+         * 这个问题,由group来解决
          */
         if (!queue.offer(command)) {
             throw new RejectedExecutionException();
@@ -381,13 +388,11 @@ class ThreadWorker extends AbstractExecutorService {
      * @return
      */
     public final void executeTimeout(Runnable command, long timeoutInMillions, ThreadWorker checkThread) {
-        if (checkThread == this) {
-            throw new RuntimeException("cancel thread can't be self thread");
-        }
         CheckTimeoutRunnable withinRunnable = new CheckTimeoutRunnable(command);
         execute(withinRunnable::run);
         checkThread.innerSchedule(withinRunnable::checkTimeout, timeoutInMillions);
     }
+
 
     /**
      * 不支持毫秒级以下的调度
