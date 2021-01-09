@@ -1,7 +1,5 @@
 package mx.homeCooking;
 
-import sun.reflect.generics.reflectiveObjects.NotImplementedException;
-
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -65,6 +63,10 @@ public class WorkerGroup extends AbstractExecutorService {
      */
     private volatile int amount = 0;
 
+
+    /**
+     * 运维线程池,维护由{@link WorkerGroup#maintainTask()}来进行
+     */
     protected ThreadWorker maintainThread;
 
 
@@ -100,7 +102,7 @@ public class WorkerGroup extends AbstractExecutorService {
          * 绑定池不用做维护
          */
         if (!isBind) {
-            maintainThread.innerSchedule(shrinkAndChangeRunnable()::run, 60);
+            maintainThread.innerSchedule(maintainTask(), 60);
         }
     }
 
@@ -186,51 +188,39 @@ public class WorkerGroup extends AbstractExecutorService {
         proxies[0].startTimeout(command, timeoutInMillions);
     }
 
-    final void clearCheckableToAllThread() {
-        setCheckableToAllThread(null);
-    }
-
-    final void setCheckableToAllThread(CheckRunnable checkRunnable) {
-        for (int i = 0; i < maxAmount; i++) {
-            ScheduledThreadWorker worker = proxies[i].worker;
-            if (worker != null) {
-                worker.setCheckRunnable(checkRunnable);
-            }
-        }
-    }
-
-    final CheckRunnable shrinkAndChangeRunnable() {
-        return new CheckRunnable() {
+    /**
+     * 日常运维任务
+     */
+    final Runnable maintainTask() {
+        return new Runnable() {
 
             volatile long startLazyTime = 0;
             volatile int queueSizeSum = 0;
-            volatile ThreadWorker singleCheckThread = maintainThread;
 
             @Override
-            long run() {
+            public void run() {
                 if (random++ > 10000) random = 1;
 
                 long nextInterval;
                 /**
-                 * 和下面的shutdown方法互斥
-                 * 同步关键字要把alreadyShutDown和start和stop操作都包括进去
+                 * 和下面的两个{@link WorkerGroup#shutdown()}方法互斥,因为shutdown方法也是改变alreadyShutDown flag和进行stop
+                 * 所以同步关键字要把alreadyShutDown和start和stop操作(check)都包括进去
                  */
                 synchronized (WorkerGroup.this) {
                     if (alreadyShutDown) {
-                        //关闭checkThread
-                        ThreadWorker singleThread = singleCheckThread;
-                        singleCheckThread = null;
-                        if (singleThread != null) {
-                            singleThread.shutdown();
+                        //关闭maintainThread
+                        if (maintainThread != null) {
+                            maintainThread.shutdown();
+                            maintainThread = null;
                         }
-                        //直接返回,如果worker争抢执行,这里退出了不会再创建check线程,如果check线程执行,就没有下一次调度了
-                        return Long.MAX_VALUE;
+                        //返回,不再有下一次调度
+                        return;
                     }
                     //调用check业务
                     nextInterval = check();
                 }
 
-                boolean changeToSingleCheckThread = false;
+                ThreadWorker checkThread = maintainThread;
 
                 if (changeCheckThread) {
                     /**
@@ -238,42 +228,39 @@ public class WorkerGroup extends AbstractExecutorService {
                      * 当不满时,使用一个独立的check线程池
                      */
                     if (amount == maxAmount) {
-                        if (singleCheckThread != null) {
-                            /**
-                             * 切换check工作到worker
-                             */
-                            //1.关闭singleCheckThread
-                            singleCheckThread.shutdown();
-                            //这里清空,在singleCheckThread上已经形不成下一次调度
-                            singleCheckThread = null;
-                            //2.设置由worker争抢
-                            nextCheckTime.set(System.currentTimeMillis() + nextInterval);
-                            setCheckableToAllThread(this);
+                        //确保关闭maintainThread
+                        if (maintainThread != null) {
+                            maintainThread.shutdown();
+                            maintainThread = null;
                         }
+
+                        /**
+                         * 改为由worker调度
+                         * 1.此时不可能收缩线程
+                         * 2.如果shutdown,worker为null,没有下一次调度
+                         */
+                        checkThread = randomProxy().worker;
+
                     } else {
-                        if (singleCheckThread == null) {
-                            //对所有线程清除checkable,改为在独立的运维线程中做check工作
-                            clearCheckableToAllThread();
-                            singleCheckThread = new ThreadWorker(groupName + "-checker");
-                            changeToSingleCheckThread = true;
+                        //确保start singleCheckThread
+                        if (maintainThread == null) {
+                            checkThread = maintainThread = new ThreadWorker(groupName + "-checker");
                         }
                     }
                 }
 
-                if (singleCheckThread != null) {
-                    singleCheckThread.innerSchedule(this::run, nextInterval);
+                if (checkThread != null) {
+                    checkThread.innerSchedule(this, nextInterval);
                 }
 
-                if (random++ > 10000) random = 1;
 
-                /**
-                 * {@link ThreadWorker#worker#run()} 这个返回值是worker争抢执行的时候,计算下一次checkTIme用的
-                 * 所以这里一旦要切换回独立的check thread,就要返回一个极大值,让worker下一次的并发争抢无效
-                 * 防止worker和check thread并发执行下一次任务
-                 */
-                return changeToSingleCheckThread ? Long.MAX_VALUE : nextInterval;
+                if (random++ > 10000) random = 1;
             }
 
+            /**
+             * 1.新增(start)和收缩(stop)线程
+             * 2.生成重平均任务
+             */
             final long check() {
                 //空闲的ThreadProxy
                 List<ThreadProxy> idleList = new ArrayList<>();
@@ -476,15 +463,12 @@ public class WorkerGroup extends AbstractExecutorService {
     }
 
     /**
-     * 主要是给线程数量不进行变化池使用,比如非绑定调度池,因为调度任务没有重平均,所以采用随机数来分配线程,这样会降低入队性能
-     * 在各业务中调度任务相对较少
+     * 因为调度任务没有重平均,所以采用随机数来分配线程,这样会降低入队性能
+     * 调度任务在各业务中调度任务相对较少
      */
     ThreadProxy randomProxy() {
-        if (isBind || isSchedule) {
-            int hash = ThreadLocalRandom.current().nextInt(4096);
-            return proxies[hash % maxAmount];
-        }
-        return null;
+        int hash = ThreadLocalRandom.current().nextInt(4096);
+        return proxies[hash % amount];
     }
 
     public int getQueueSize() {

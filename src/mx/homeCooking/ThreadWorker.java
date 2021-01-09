@@ -60,38 +60,18 @@ class ThreadWorker extends AbstractExecutorService {
         }
     }
 
-
-    /**
-     * 1.普通线程池
-     * 2.调度线程池
-     * 3.自己check的普通线程池
-     * 4.自己check的调度线程池
-     * <p>
-     * check可以提供降级,即不再理会check
-     */
-    private volatile CheckRunnable checkRunnable;
-
-    /**
-     * 设置checkable
-     *
-     * @param checkRunnable
-     */
-    final void setCheckRunnable(CheckRunnable checkRunnable) {
-        this.checkRunnable = checkRunnable;
-    }
-
     private volatile boolean continueWorking;
 
     final Runnable worker = new Runnable() {
 
         ScheduleCommandNode scheduleTask;
-        long now;
 
         /**
          * 收集到时的定时任务
          */
         private final long fetchScheduleTasks(long firstDate) {
             final ConcurrentSkipListMap<Long, ScheduleCommandNode> sl = skipList;
+            long now = System.currentTimeMillis();
             /**
              * 将所有到点的定时任务都取出,合并在一起
              */
@@ -135,25 +115,6 @@ class ThreadWorker extends AbstractExecutorService {
              * working
              */
             while (continueWorking) {
-                now = System.currentTimeMillis();
-                /**
-                 * 下面是在线程池内部check的代码
-                 */
-                CheckRunnable check = checkRunnable;
-                if (check != null) {
-                    AtomicLong nextCheckTime = check.nextCheckTime;
-                    long _nextCheckTime = nextCheckTime.get();
-                    if (now >= _nextCheckTime) {
-                        //这里形成争抢执行
-                        if (nextCheckTime.compareAndSet(_nextCheckTime, Long.MAX_VALUE)) {
-                            long interval = check.run();
-                            //重新取now值
-                            now = System.currentTimeMillis();
-                            nextCheckTime.set(now + interval);
-                        }
-                    }
-                }
-
                 /**
                  * 轮询所有超时的定时任务
                  */
