@@ -135,7 +135,8 @@ public class WorkerGroup extends AbstractExecutorService {
     volatile int random = 7;
 
     /**
-     * 随机算则线程来执行task
+     * 随机算则线程来执行task,这个随机算法在入队线程较少的时候依赖random的改变
+     * <p>
      * 在threadAmountAdjust时,因为proxy的execute和stop之间是互斥的,此方法保证在同时发生shutdown时不会丢失任务
      * 在非threadAmountAdjust时,再shutdown同时execute成功一个任务,这个任务可能不会被执行或terminate,造成此任务会丢失
      * 在需要shutdown的场合,shutdown需要和execute同步
@@ -164,7 +165,7 @@ public class WorkerGroup extends AbstractExecutorService {
      * 支持超时操作
      * 为了提高性能,代码冗余较多
      */
-    public void executeTimeout(Runnable command,  long delay, TimeUnit unit) {
+    public void executeTimeout(Runnable command, long delay, TimeUnit unit) {
         long timeoutInMillions = unit.toMillis(delay);
 
         int hash = (int) Thread.currentThread().getId() + random;
@@ -173,7 +174,7 @@ public class WorkerGroup extends AbstractExecutorService {
             /**
              * 如果proxy已经stop了,就再次分配
              */
-            if (proxies[hash % _mount].executeTimeout(command,timeoutInMillions)) {
+            if (proxies[hash % _mount].executeTimeout(command, timeoutInMillions)) {
                 return;
             }
             _mount--;
@@ -182,7 +183,7 @@ public class WorkerGroup extends AbstractExecutorService {
         /**
          * 启动线程0来执行任务
          */
-        proxies[0].startTimeout(command,timeoutInMillions);
+        proxies[0].startTimeout(command, timeoutInMillions);
     }
 
     final void clearCheckableToAllThread() {
@@ -285,13 +286,20 @@ public class WorkerGroup extends AbstractExecutorService {
                     ThreadProxy proxy = proxies[i];
                     int queueSize = proxy.tempQueueSize = proxy.queueSize();
                     if (queueSize == 0) {
-                        idleList.add(proxy);
+                        ScheduledThreadWorker idleWorker = proxy.worker;
+                        if (idleWorker != null
+                                && idleWorker.thread.getState() == Thread.State.TIMED_WAITING) {
+                            idleList.add(proxy);
+                        }
                     } else {
+                        //System.err.print(i+"###"+queueSize+" , ");
                         busyList.add(proxy);
                     }
 
                     queueSizeSum += queueSize;
                 }
+
+                //System.err.println("         "+System.currentTimeMillis());
 
                 int _amount = amount;
 
@@ -335,6 +343,7 @@ public class WorkerGroup extends AbstractExecutorService {
                         }
                     }
                 }
+
 
                 /**
                  * 因为后添加的线程都是右边线程,所以左边的旧线程积累的任务通常较多
@@ -478,6 +487,15 @@ public class WorkerGroup extends AbstractExecutorService {
         return null;
     }
 
+    public int getQueueSize() {
+        int sum = 0;
+        for (int i = 0; i < maxAmount; i++) {
+            ThreadProxy proxy = proxies[i];
+            sum += proxy.queueSize();
+        }
+        return sum;
+    }
+
     /**
      * 此类包装一个单线程的线程池
      */
@@ -615,24 +633,15 @@ public class WorkerGroup extends AbstractExecutorService {
              * 直接分担繁忙线程一半的任务给自己
              */
             return () -> {
-                Queue formQueue = proxies[busyIndex].getTaskQueue();
-                if (formQueue == null) return;
-                //从繁忙线程分担的任务数
+                ScheduledThreadWorker busyWorker = proxies[busyIndex].getWorker();
+                if (busyWorker == null) return;
+                //从繁忙线程分担的任务数,当繁忙线程队列中只有一个任务的时候,也要将这个任务拿过来
                 int shareSize = Math.round(busyQueueSize / 2f);
+                //从繁忙线程中窃取
+                List<Runnable> tasks = busyWorker.stealTask(shareSize);
+                getWorker().execute(tasks);
 
-                Queue toQueue = getTaskQueue();
-                while (--shareSize > 0) {
-                    Runnable task = (Runnable) formQueue.poll();
-                    if (task == null) {
-                        break;
-                    }
-                    /**
-                     * 如果此任务正在执行时shutdown
-                     * ScheduledThreadWorker会等待当前正在执行的任务执行完毕再进入shutdown流程
-                     * 所以进入shutdown流程之前,这些task都已经入队,不会被丢弃
-                     */
-                    toQueue.offer(task);
-                }
+                //System.err.println("----"+index+" steal from:"+busyIndex+"/计划窃取数量:"+shareSize+"/实际窃取数量"+tasks.size());
             };
         }
 
@@ -643,15 +652,6 @@ public class WorkerGroup extends AbstractExecutorService {
             }
 
             return 0;
-        }
-
-        Queue getTaskQueue() {
-            final ScheduledThreadWorker _worker = worker;
-            if (_worker != null) {
-                return _worker.getQueue();
-            }
-
-            return null;
         }
 
         ScheduledThreadWorker getWorker() {

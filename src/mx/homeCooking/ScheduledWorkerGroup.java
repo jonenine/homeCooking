@@ -7,6 +7,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 绑定池就是所有方法都在最前面加一个hash参数
+ * 所有的调度方法都使用randomProxy来获取worker,randomProxy更加均匀但是入队更慢
  */
 public class ScheduledWorkerGroup extends WorkerGroup implements TimeoutScheduledExecutorService {
 
@@ -32,11 +33,6 @@ public class ScheduledWorkerGroup extends WorkerGroup implements TimeoutSchedule
     @Override
     public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command, long initialDelay, long delay, TimeUnit unit) {
         return randomProxy().worker.scheduleWithFixedDelay(command, initialDelay, delay, unit);
-    }
-
-    @Override
-    public void executeTimeout(Runnable command, long delay, TimeUnit unit) {
-        randomProxy().worker.executeTimeout(command, unit.toMillis(delay), maintainThread);
     }
 
     @Override

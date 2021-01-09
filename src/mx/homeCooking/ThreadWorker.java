@@ -1,7 +1,5 @@
 package mx.homeCooking;
 
-import sun.reflect.generics.reflectiveObjects.NotImplementedException;
-
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -25,7 +23,7 @@ class ThreadWorker extends AbstractExecutorService {
     /**
      * 普通任务队列
      */
-    final Queue<Runnable> queue = new ConcurrentLinkedQueue();
+    final ConcurrentLinkedQueue<Runnable> queue = new ConcurrentLinkedQueue();
 
     public final Queue<Runnable> getQueue() {
         return queue;
@@ -304,6 +302,13 @@ class ThreadWorker extends AbstractExecutorService {
     }
 
     /**
+     * 从这个对列中偷任务
+     */
+    List<Runnable> stealTask(int stealSize) {
+        return signal.stealTask(this.queue, stealSize);
+    }
+
+    /**
      * 判断是否空闲
      */
     public final boolean isIdle() {
@@ -338,8 +343,27 @@ class ThreadWorker extends AbstractExecutorService {
          * 这里因为线程调度的原因,极少可能出现上面的offer进去的command都执行完了,才执行的下面的signal.set
          * 此时会将await循环提前唤醒
          */
-        signal.setAndIncrementExecuteCount(commonTaskSignal);
+        signal.setAndAddExecuteCount(commonTaskSignal,1);
     }
+
+    final void execute(List<Runnable> commands) {
+        if (!continueWorking) {
+            throw new RejectedExecutionException();
+        }
+
+        if(commands.isEmpty()) return;
+
+        if (!queue.addAll(commands)) {
+            throw new RejectedExecutionException();
+        }
+
+        /**
+         * 这里因为线程调度的原因,极少可能出现上面的offer进去的command都执行完了,才执行的下面的signal.set
+         * 此时会将await循环提前唤醒
+         */
+        signal.setAndAddExecuteCount(commonTaskSignal, commands.size());
+    }
+
 
     private class CheckTimeoutRunnable implements Runnable {
         final Runnable command;
@@ -388,9 +412,9 @@ class ThreadWorker extends AbstractExecutorService {
      * @return
      */
     public final void executeTimeout(Runnable command, long timeoutInMillions, ThreadWorker checkThread) {
-        CheckTimeoutRunnable withinRunnable = new CheckTimeoutRunnable(command);
-        execute(withinRunnable::run);
-        checkThread.innerSchedule(withinRunnable::checkTimeout, timeoutInMillions);
+        CheckTimeoutRunnable checkTimeoutRunnable = new CheckTimeoutRunnable(command);
+        execute(checkTimeoutRunnable::run);
+        checkThread.innerSchedule(checkTimeoutRunnable::checkTimeout, timeoutInMillions);
     }
 
 
@@ -645,10 +669,8 @@ class ThreadWorker extends AbstractExecutorService {
 
         volatile long executeCount;
 
-        /**
-         * 增加一个具有count的功能的set方法
-         */
-        void setAndIncrementExecuteCount(int flag) {
+
+        void setAndAddExecuteCount(int flag, int batchSize) {
             final ReentrantLock l = lock;
             l.lock();
             int _state = state;
@@ -657,10 +679,36 @@ class ThreadWorker extends AbstractExecutorService {
                     state = _state | flag;
                     notZero.signal();
                 }
-                executeCount++;
+                executeCount = executeCount + batchSize;
             } finally {
                 l.unlock();
             }
+        }
+
+        List<Runnable> stealTask(Queue<Runnable> queue, int stealSize) {
+            ArrayList<Runnable> steals = new ArrayList<>();
+            for (; ; ) {
+                Runnable task = queue.poll();
+                if (task != null) {
+                    steals.add(task);
+                    if (steals.size() == stealSize) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if (!steals.isEmpty()) {
+                final ReentrantLock l = lock;
+                l.lock();
+                try {
+                    executeCount = executeCount - steals.size();
+                } finally {
+                    l.unlock();
+                }
+            }
+            return steals;
         }
 
 
