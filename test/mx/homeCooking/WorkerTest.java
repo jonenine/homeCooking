@@ -76,7 +76,7 @@ public class WorkerTest {
                     }
                 }
                 if (count == sum) {
-                    System.out.println("完成消费" + count + "/" + threadWorker.size());
+                    System.out.println("完成消费" + count + "/" + threadWorker.getQueueSize());
                 } else if (count > sum) {
                     System.err.println("消费个数大于生产个数");
                     System.exit(1);
@@ -106,13 +106,13 @@ public class WorkerTest {
         //已经消费数
         int count = counter.get();
         //剩余任务数
-        int remain = threadWorker.size();
+        int remain = threadWorker.getQueueSize();
 
         System.out.println("当前消费:" + count + "/剩余:" + remain + "/消费+剩余:" + (count + remain));
         while (threadWorker.getThread().isAlive()) {
 
         }
-        System.err.println(threadWorker.size());
+        System.err.println(threadWorker.getQueueSize());
     }
 
     @Test
@@ -129,6 +129,38 @@ public class WorkerTest {
             testShutDown();
         }
 
+    }
+
+    static void sleep(long l){
+        try {
+            Thread.sleep(l);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Test
+    public void testThreadState() throws Exception {
+        ThreadWorker threadWorker = new ThreadWorker("test");
+
+        long start = System.currentTimeMillis();
+        Thread.State state;
+        do{
+            sleep(1);
+            state= threadWorker.getThread().getState();
+            //System.out.println("开始:"+state);
+        }while (state != Thread.State.TIMED_WAITING);
+        System.out.println("线程创建后需要"+(System.currentTimeMillis()-start)+"才可以进入TIMED_WAITING");
+
+
+        threadWorker.execute(()->{
+            System.out.print("正在执行任务:");
+            System.out.println(threadWorker.getThread().getState());
+        });
+        sleep(10);
+
+
+        System.out.println("执行任务之后:"+threadWorker.getThread().getState());
     }
 
 
@@ -159,7 +191,7 @@ public class WorkerTest {
                         }
                         //2.
                         try {
-                            Thread.sleep(threadWorker.size() % 3);
+                            Thread.sleep(threadWorker.getQueueSize() % 3);
                             //System.out.println("-----:" + threadWorker.size());
                         } catch (Exception e) {
                             e.printStackTrace();
@@ -172,12 +204,12 @@ public class WorkerTest {
                             });
                         }).start();
 
-                        System.out.println("-----:" + threadWorker.size());
+                        System.out.println("-----:" + threadWorker.getQueueSize());
 
-                        while (threadWorker.size() > 0) {
+                        while (threadWorker.getQueueSize() > 0) {
 
                         }
-                        System.out.println(count.incrementAndGet() + "/" + threadWorker.size());
+                        System.out.println(count.incrementAndGet() + "/" + threadWorker.getQueueSize());
                         System.err.println(ii + "-" + batchCount.incrementAndGet());
 
                     }
@@ -190,6 +222,8 @@ public class WorkerTest {
         } catch (InterruptedException e) {
         }
     }
+
+
 
     /**
      * 测试调度
