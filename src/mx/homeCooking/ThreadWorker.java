@@ -5,6 +5,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 class ThreadWorker extends AbstractExecutorService {
 
@@ -36,7 +37,7 @@ class ThreadWorker extends AbstractExecutorService {
     /**
      * 超时任务队列
      */
-    final ConcurrentSkipListMap<Long, ScheduleCommandNode> skipList = new ConcurrentSkipListMap();
+    private final ConcurrentSkipListMap<Long, ScheduleCommandNode> skipList = new ConcurrentSkipListMap();
 
     final ConcurrentHashMap<Long, Void> scheduleMapLock = new ConcurrentHashMap(16);
 
@@ -207,6 +208,11 @@ class ThreadWorker extends AbstractExecutorService {
             }//~while
 
             /**
+             * 退出working
+             */
+            onShutdown();
+
+            /**
              * shutdown
              */
             List<Runnable> terminatedTask = (terminatedTasks != null) ? new ArrayList<>() : null;
@@ -323,6 +329,10 @@ class ThreadWorker extends AbstractExecutorService {
         }
 
         signal.setAndAddExecuteCount(commonTaskSignal, batch.size());
+    }
+
+    final void signalExecuteCommonTask(int size){
+        signal.setAndAddExecuteCount(commonTaskSignal, size);
     }
 
 
@@ -452,8 +462,7 @@ class ThreadWorker extends AbstractExecutorService {
         }
     }
 
-
-    static final class ScheduleCommandNode implements Runnable {
+    private static final class ScheduleCommandNode implements Runnable {
         final Runnable task;
         ScheduleCommandNode next;
 
@@ -484,11 +493,24 @@ class ThreadWorker extends AbstractExecutorService {
 
 
         @Override
-        public void run() {
+        public final void run() {
             ScheduleCommandNode t = this;
             do {
                 try {
                     t.task.run();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+
+                t = t.next;
+            } while (t != null);
+        }
+
+        public final void travel(Consumer<Runnable> callback) {
+            ScheduleCommandNode t = this;
+            do {
+                try {
+                    callback.accept(t.task);
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
@@ -507,6 +529,14 @@ class ThreadWorker extends AbstractExecutorService {
         return skipList.size();
     }
 
+
+    void onShutdown(){
+
+    }
+
+    /**
+     * 此方法立即返回,不会等待什么状态
+     */
     @Override
     public void shutdown() {
         synchronized (this) {
@@ -567,7 +597,19 @@ class ThreadWorker extends AbstractExecutorService {
         return !continueWorking;
     }
 
-    private final CountDownLatch terminationCDL = new CountDownLatch(1);
+
+    void pollAllScheduledTasks(Consumer<Runnable> task){
+        Map.Entry<Long, ScheduleCommandNode> entry;
+        while ((entry = skipList.pollFirstEntry()) != null) {
+            ScheduleCommandNode node = entry.getValue();
+            node.travel(task);
+        }
+    }
+
+    /**
+     * {@link ThreadWorker#worker}
+     */
+    final CountDownLatch terminationCDL = new CountDownLatch(1);
 
     @Override
     public boolean isTerminated() {

@@ -25,12 +25,12 @@ public class ScheduledThreadWorker extends ThreadWorker implements ScheduledExec
 
     @Override
     public TaskFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
-        return toSchedule(command, false,unit.toMillis(delay));
+        return toSchedule(command, false, unit.toMillis(delay));
     }
 
     @Override
     public <V> TaskFuture<V> schedule(Callable<V> callable, long delay, TimeUnit unit) {
-        return toSchedule(callable, true,unit.toMillis(delay));
+        return toSchedule(callable, true, unit.toMillis(delay));
     }
 
     private final void addCancelWhenTimeout(long timeout, ThreadWorker checkThread, TimeUnit unit, TaskFuture<?>[] futures) {
@@ -201,5 +201,16 @@ public class ScheduledThreadWorker extends ThreadWorker implements ScheduledExec
         return toScheduleManyTimes(command, initialDelay, delay, unit, false);
     }
 
+    /**
+     * 将所有的定时任务取消
+     */
+    @Override
+    void onShutdown(){
+        pollAllScheduledTasks((task) -> {
+            if (task instanceof TaskFuture) {
+                ((TaskFuture) task).cancel(false);
+            }
+        });
+    }
 
 }

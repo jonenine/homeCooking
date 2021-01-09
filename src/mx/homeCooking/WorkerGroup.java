@@ -140,8 +140,8 @@ public class WorkerGroup extends AbstractExecutorService {
      * 随机算则线程来执行task,这个随机算法在入队线程较少的时候依赖random的改变
      * <p>
      * 在threadAmountAdjust时,因为proxy的execute和stop之间是互斥的,此方法保证在同时发生shutdown时不会丢失任务
-     * 在非threadAmountAdjust时,再shutdown同时execute成功一个任务,这个任务可能不会被执行或terminate,造成此任务会丢失
-     * 在需要shutdown的场合,shutdown需要和execute同步
+     * 在非threadAmountAdjust时,shutdown同时execute成功一个任务,这个任务可能不会被执行或terminate,造成此任务会丢失
+     * 所以在需要shutdown的场合,shutdown需要和execute同步
      */
     @Override
     public final void execute(Runnable task) {
@@ -173,18 +173,12 @@ public class WorkerGroup extends AbstractExecutorService {
         int hash = (int) Thread.currentThread().getId() + random;
         int _mount = amount;
         while (_mount > 0) {
-            /**
-             * 如果proxy已经stop了,就再次分配
-             */
             if (proxies[hash % _mount].executeTimeout(command, timeoutInMillions)) {
                 return;
             }
             _mount--;
         }
 
-        /**
-         * 启动线程0来执行任务
-         */
         proxies[0].startTimeout(command, timeoutInMillions);
     }
 
@@ -351,6 +345,7 @@ public class WorkerGroup extends AbstractExecutorService {
                             ThreadProxy idleProxy = idleList.get(i);
                             ThreadProxy busyProxy = busyList.get(i);
                             ScheduledThreadWorker idleWorker = idleProxy.worker;
+                            //和shutdown互斥,不可能为null
                             if (idleWorker != null) {
                                 Runnable rebalanceTask = idleProxy.rebalanceTask(idleWorker, busyProxy.index, busyProxy.tempQueueSize);
                                 idleProxy.execute(rebalanceTask);
@@ -620,7 +615,7 @@ public class WorkerGroup extends AbstractExecutorService {
         Runnable rebalanceTask(ScheduledThreadWorker oldWorker, int busyIndex, int busyQueueSize) {
             /**
              * 如果此任务被成功execute,并成功run,有可能处于销毁时的假运行状态
-             * 即使worker没有被shutdown,任务在run的时候也随时会shutdown
+             * 即使worker没有被shutdown,任务在run的时候worker也随时会shutdown
              */
             return () -> {
                 ScheduledThreadWorker busyWorker = proxies[busyIndex].getWorker();
@@ -635,7 +630,7 @@ public class WorkerGroup extends AbstractExecutorService {
                 List<Runnable> tasks = busyWorker.stealTask(shareSize);
                 if (tasks.isEmpty()) return;
 
-                boolean executed = false;
+                boolean rebalanced = false;
                 /**
                  * 和stop互斥,也就是和运维线程的stop操作和shutdown操作互斥
                  */
@@ -645,9 +640,9 @@ public class WorkerGroup extends AbstractExecutorService {
                     if (worker != null) {
                         try {
                             worker.executeBatch(tasks);
-                            executed = true;
+                            rebalanced = true;
                         } catch (Exception e) {
-                            executed = false;
+                            rebalanced = false;
                         }
                     }
                 } finally {
@@ -660,13 +655,44 @@ public class WorkerGroup extends AbstractExecutorService {
                  * 此时alreadyShutDown(group shutdown在各个worker shutdown之前)肯定是true
                  * 2.worker被运维线程shutdown了,目前是此线程真运行的最后一个任务,将这些任务再分散入到group的所有线程队列中去
                  */
-                if (!executed && !alreadyShutDown) {
-                    for (Runnable task : tasks) {
-                        WorkerGroup.this.execute(task);
-                        //这里是单线程,确保入队的分散性
-                        random++;
+                Runnable task = null;
+                if (!rebalanced) {
+                    Iterator<Runnable> itor = tasks.iterator();
+                    if (!alreadyShutDown) {
+                        while (itor.hasNext()) {
+                            task = itor.next();
+                            try {
+                                WorkerGroup.this.execute(task);
+                                random++;
+                                task = null;
+                            } catch (Exception e) {
+                                break;
+                            }
+                        }
                     }
-                }
+
+                    /**
+                     * 如果在分散插入到group的过程中,group shutdown导致插入报错
+                     * 此时仍是真运行的最后一个任务,将这这些任务直接插入oldWorker的队列中,可以确保这些任务被正确回收
+                     * 此时worker已经失效了,所以要用oldWorker
+                     */
+                    ConcurrentLinkedQueue<Runnable> queue = oldWorker.queue;
+                    int offerSize = 0;
+                    //插入上面报错的那个任务
+                    if (task != null) {
+                        queue.offer(task);
+                        offerSize++;
+                    }
+
+                    while (itor.hasNext()) {
+                        task = itor.next();
+                        queue.offer(task);
+                        offerSize++;
+                    }
+
+                    oldWorker.signalExecuteCommonTask(offerSize);
+                }//~ not rebalanced
+
 
                 //System.err.println("----" + index + " steal from:" + busyIndex + "/计划窃取数量:" + shareSize + "/实际窃取数量" + tasks.size());
             };
