@@ -266,11 +266,11 @@ public class WorkerGroup extends AbstractExecutorService {
 
                 for (int i = 0; i < maxAmount; i++) {
                     ThreadProxy proxy = proxies[i];
+                    //注意queueSize取的是线程池中已经入队还没有完成的任务数,包括当前正在执行的任务
                     int queueSize = proxy.tempQueueSize = proxy.queueSize();
                     if (queueSize == 0) {
                         ScheduledThreadWorker idleWorker = proxy.worker;
-                        if (idleWorker != null
-                                && idleWorker.thread.getState() == Thread.State.TIMED_WAITING) {
+                        if (idleWorker != null) {
                             idleList.add(proxy);
                         }
                     } else {

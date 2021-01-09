@@ -215,7 +215,6 @@ class ThreadWorker extends AbstractExecutorService {
             /**
              * shutdown
              */
-            List<Runnable> terminatedTask = (terminatedTasks != null) ? new ArrayList<>() : null;
             for (; ; ) {
                 Runnable task = q.poll();
                 if (task != null) {
@@ -225,6 +224,7 @@ class ThreadWorker extends AbstractExecutorService {
                         /**
                          * shutdown后将剩余任务处理完毕,只处理非定时任务
                          * 此时为销毁时的假运行
+                         * 在task中已经不能再向本线程execute或schedule任务了,因为此时continueWorking==false
                          */
                         try {
                             task.run();
@@ -237,10 +237,6 @@ class ThreadWorker extends AbstractExecutorService {
                 } else {
                     break;
                 }
-            }
-
-            if (terminatedTasks != null) {
-                terminatedTasks.offer(terminatedTask);
             }
 
             /**
@@ -256,7 +252,7 @@ class ThreadWorker extends AbstractExecutorService {
     private final AtomicLong consumerCount = new AtomicLong(0);
 
     /**
-     * 线程池中缓存的,还没有完成的任务数.传统线程池的size表示的是队列中的任务数
+     * 线程池中已经入队还没有完成的任务数,包括当前正在执行的任务.传统线程池的size表示的是队列中的任务数
      * 提供快速取size
      */
     public final int getQueueSize() {
@@ -274,13 +270,6 @@ class ThreadWorker extends AbstractExecutorService {
      */
     List<Runnable> stealTask(int stealSize) {
         return signal.stealTask(this.queue, stealSize);
-    }
-
-    /**
-     * 判断是否空闲
-     */
-    public final boolean isIdle() {
-        return getQueueSize() == 0 && thread.getState() == Thread.State.TIMED_WAITING;
     }
 
 
@@ -425,7 +414,7 @@ class ThreadWorker extends AbstractExecutorService {
                  * skipList有重复问题,现在以链表解决
                  * {@link ConcurrentSkipListMap#compute} JDK的注释:The function is NOT guaranteed to be applied once atomically.
                  * https://stackoverflow.com/questions/53310936/is-concurrentskiplistmap-compute-safe-for-relative-updates
-                 * 文章好像是说,对于skipList的值修改而言,是同步的 x=x+1在多线程下是安全的
+                 * 文章好像是说,对于skipList的值修改而言,x=x+1在多线程下是安全的
                  * 但对于回调中的代码而言,并不保证在一个key上串行化(对比concurrentHashMap#comput)
                  * Stephen C(不知何方神圣):好像是因为使用了类似于原子值的自旋算法,从而可能会重复执行回调,而且不对回调做同步
                  *
@@ -554,13 +543,13 @@ class ThreadWorker extends AbstractExecutorService {
         signal.set(shutDownSignal);
     }
 
-    private volatile BlockingQueue<List<Runnable>> terminatedTasks = null;
+    private volatile List<Runnable> terminatedTask = null;
 
     List<Runnable> shutdownNow(boolean waitForTerminate) {
         synchronized (this) {
             if (continueWorking == true) {
                 //设置terminatedTasks一定要在设置continueWorking前面
-                terminatedTasks = new ArrayBlockingQueue<>(1);
+                terminatedTask = new ArrayList<>();
                 continueWorking = false;
             } else {
                 return null;
@@ -575,10 +564,11 @@ class ThreadWorker extends AbstractExecutorService {
 
     List<Runnable> getTerminatedTask() {
         try {
+            terminationCDL.await();
             /**
              * 等待结束
              */
-            return terminatedTasks.take();
+            return terminatedTask;
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
