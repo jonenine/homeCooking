@@ -218,6 +218,7 @@ class ThreadWorker extends AbstractExecutorService {
                     } else {
                         /**
                          * shutdown后将剩余任务处理完毕,只处理非定时任务
+                         * 此时为销毁时的假运行
                          */
                         try {
                             task.run();
@@ -307,22 +308,21 @@ class ThreadWorker extends AbstractExecutorService {
         signal.setAndAddExecuteCount(commonTaskSignal,1);
     }
 
-    final void execute(List<Runnable> commands) {
+    /**
+     * 此方法是batch的,要不都成功,要不都失败
+     */
+    final void executeBatch(List<Runnable> batch) {
         if (!continueWorking) {
             throw new RejectedExecutionException();
         }
 
-        if(commands.isEmpty()) return;
+        if(batch.isEmpty()) return;
 
-        if (!queue.addAll(commands)) {
+        if (!queue.addAll(batch)) {
             throw new RejectedExecutionException();
         }
 
-        /**
-         * 这里因为线程调度的原因,极少可能出现上面的offer进去的command都执行完了,才执行的下面的signal.set
-         * 此时会将await循环提前唤醒
-         */
-        signal.setAndAddExecuteCount(commonTaskSignal, commands.size());
+        signal.setAndAddExecuteCount(commonTaskSignal, batch.size());
     }
 
 

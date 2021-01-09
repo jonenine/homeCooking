@@ -280,14 +280,14 @@ public class WorkerGroup extends AbstractExecutorService {
                             idleList.add(proxy);
                         }
                     } else {
-                        System.err.print(i+"###"+queueSize+" , ");
+                        //System.err.print(i + "###" + queueSize + " , ");
                         busyList.add(proxy);
                     }
 
                     queueSizeSum += queueSize;
                 }
 
-                System.err.println("         "+System.currentTimeMillis());
+                //System.err.println("         " + System.currentTimeMillis());
 
                 int _amount = amount;
 
@@ -348,10 +348,13 @@ public class WorkerGroup extends AbstractExecutorService {
                     for (int i = 0, l = busyList.size(); i < l; i++) {
                         if (i < idleList.size()) {
                             //忙的线程匹配闲的线程
-                            ThreadProxy idleWorker = idleList.get(i);
-                            ThreadProxy busyWorker = busyList.get(i);
-                            Runnable rebalanceTask = idleWorker.rebalanceTask(busyWorker.index, busyWorker.tempQueueSize);
-                            idleWorker.execute(rebalanceTask);
+                            ThreadProxy idleProxy = idleList.get(i);
+                            ThreadProxy busyProxy = busyList.get(i);
+                            ScheduledThreadWorker idleWorker = idleProxy.worker;
+                            if (idleWorker != null) {
+                                Runnable rebalanceTask = idleProxy.rebalanceTask(idleWorker, busyProxy.index, busyProxy.tempQueueSize);
+                                idleProxy.execute(rebalanceTask);
+                            }
                         }
                     }//~for
                 }//~if
@@ -540,13 +543,13 @@ public class WorkerGroup extends AbstractExecutorService {
          *
          */
         ScheduledThreadWorker stop(boolean isShutDownNow) {
-            ScheduledThreadWorker _executor;
+            ScheduledThreadWorker _worker;
 
             final ReentrantReadWriteLock.WriteLock lock = writeLock;
             lock.lock();
             try {
-                _executor = worker;
-                if (_executor != null) {
+                _worker = worker;
+                if (_worker != null) {
                     amount--;
                     worker = null;
                 } else {
@@ -557,13 +560,13 @@ public class WorkerGroup extends AbstractExecutorService {
             }
 
             if (isShutDownNow) {
-                _executor.shutdownNow(false);
+                _worker.shutdownNow(false);
             } else {
-                _executor.shutdown();
+                _worker.shutdown();
             }
 
 
-            return _executor;
+            return _worker;
         }
 
         /**
@@ -614,39 +617,58 @@ public class WorkerGroup extends AbstractExecutorService {
          */
         int tempQueueSize;
 
-        Runnable rebalanceTask(int busyIndex, int busyQueueSize) {
+        Runnable rebalanceTask(ScheduledThreadWorker oldWorker, int busyIndex, int busyQueueSize) {
             /**
-             * 直接分担繁忙线程一半的任务给自己
+             * 如果此任务被成功execute,并成功run,有可能处于销毁时的假运行状态
+             * 即使worker没有被shutdown,任务在run的时候也随时会shutdown
              */
             return () -> {
                 ScheduledThreadWorker busyWorker = proxies[busyIndex].getWorker();
-                if (busyWorker == null) return;
-
+                if (busyWorker == null || oldWorker != worker) return;
+                /**
+                 * 能进入下面代码,说明worker shutdown在这之后发生
+                 * 这个任务运行在worker shutdown之前,不是销毁时假运行的任务
+                 */
                 //从繁忙线程分担的任务数,当繁忙线程队列中只有一个任务的时候,也要将这个任务拿过来
                 int shareSize = Math.round(busyQueueSize / 2f);
-                //从繁忙线程中窃取
+                //从繁忙线程中窃取任务,此任务已经被取出,要尽量确保其不会丢失
                 List<Runnable> tasks = busyWorker.stealTask(shareSize);
-                //此任务还在运行中,但也有极小可能是stop之后的假运行
+                if (tasks.isEmpty()) return;
+
                 boolean executed = false;
-                ScheduledThreadWorker _worker = worker;
-                if (_worker != null) {
-                    try {
-                        //如果这个瞬间shutdown,这些任务还是可能会丢失
-                        _worker.execute(tasks);
-                        executed = true;
-                    } catch (Exception e) {
-                        executed = false;
+                /**
+                 * 和stop互斥,也就是和运维线程的stop操作和shutdown操作互斥
+                 */
+                final ReentrantReadWriteLock.ReadLock lock = readLock;
+                if (shrinkThreadPool) lock.lock();
+                try {
+                    if (worker != null) {
+                        try {
+                            worker.executeBatch(tasks);
+                            executed = true;
+                        } catch (Exception e) {
+                            executed = false;
+                        }
                     }
+                } finally {
+                    if (shrinkThreadPool) lock.unlock();
                 }
-                //如果明确此proxy的原线程已经销毁,就将其再分散入到group的所有线程队列中去
-                if(!executed && !alreadyShutDown){
-                    for(Runnable task:tasks){
+
+                /**
+                 * 由于在上面return语句和lock语句之间,worker被shutdown了,可能性不大,但不会没有
+                 * 1.executed失败如果是group shutdown引起的
+                 * 此时alreadyShutDown(group shutdown在各个worker shutdown之前)肯定是true
+                 * 2.worker被运维线程shutdown了,目前是此线程真运行的最后一个任务,将这些任务再分散入到group的所有线程队列中去
+                 */
+                if (!executed && !alreadyShutDown) {
+                    for (Runnable task : tasks) {
                         WorkerGroup.this.execute(task);
                         //这里是单线程,确保入队的分散性
                         random++;
                     }
                 }
-                System.err.println("----"+index+" steal from:"+busyIndex+"/计划窃取数量:"+shareSize+"/实际窃取数量"+tasks.size());
+
+                //System.err.println("----" + index + " steal from:" + busyIndex + "/计划窃取数量:" + shareSize + "/实际窃取数量" + tasks.size());
             };
         }
 
