@@ -2,6 +2,7 @@ package mx.homeCooking;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -63,11 +64,10 @@ public class WorkerGroup extends AbstractExecutorService {
      */
     private volatile int amount = 0;
 
-
     /**
-     * 运维线程池,维护由{@link WorkerGroup#maintainTask()}来进行
+     * 运维线程池
      */
-    protected ThreadWorker maintainThread;
+    protected volatile ThreadWorker maintainThread;
 
 
     /**
@@ -102,7 +102,7 @@ public class WorkerGroup extends AbstractExecutorService {
          * 绑定池不用做维护
          */
         if (!isBind) {
-            maintainThread.innerSchedule(maintainTask(), 60);
+            startCheckTask();
         }
     }
 
@@ -185,11 +185,37 @@ public class WorkerGroup extends AbstractExecutorService {
     /**
      * 日常运维任务
      */
-    final Runnable maintainTask() {
-        return new Runnable() {
+    final CheckTask startCheckTask() {
+
+        return new CheckTask(maintainThread) {
 
             @Override
-            public void run() {
+            void changeToCheckThread() {
+                //取消worker争抢执行check
+                for (int i = 0; i < maxAmount; i++) {
+                    ScheduledThreadWorker worker = proxies[i].worker;
+                    if (worker != null) {
+                        worker.clearCheckTask();
+                    }
+                }
+                //创建新的check thread
+                super.changeToCheckThread();
+            }
+
+            @Override
+            void changeToWorkers() {
+                //关掉check thread
+                super.changeToWorkers();
+                //设置worker争抢check
+                for (int i = 0; i < maxAmount; i++) {
+                    ScheduledThreadWorker worker = proxies[i].worker;
+                    if (worker != null) {
+                        worker.setCheckTask(this);
+                    }
+                }
+            }
+
+            long check(AtomicBoolean returnIfInCheckThread) {
                 if (random++ > 10000) random = 1;
 
                 long nextInterval;
@@ -199,55 +225,26 @@ public class WorkerGroup extends AbstractExecutorService {
                  */
                 synchronized (WorkerGroup.this) {
                     if (alreadyShutDown) {
-                        //关闭maintainThread
-                        if (maintainThread != null) {
-                            maintainThread.shutdown();
-                            maintainThread = null;
-                        }
+                        shutdownCheckThread();
                         //返回,不再有下一次调度
-                        return;
+                        return minInterval;
                     }
                     //调用check业务
-                    nextInterval = check();
+                    nextInterval = toCheck();
                 }
 
-                ThreadWorker checkThread = maintainThread;
-
                 if (changeCheckThread) {
-                    /**
-                     * 当线程池满时,让所有的worker自己进行check
-                     * 当不满时,使用一个独立的check线程池
-                     */
                     if (amount == maxAmount) {
-                        //确保关闭maintainThread
-                        if (maintainThread != null) {
-                            maintainThread.shutdown();
-                            maintainThread = null;
-                        }
-
-                        /**
-                         * 改为由worker调度
-                         * 1.此时不可能收缩线程
-                         * 2.如果shutdown,worker为null,没有下一次调度
-                         */
-                        checkThread = randomProxy().worker;
-
+                        returnIfInCheckThread.set(false);
                     } else {
-                        //确保start singleCheckThread
-                        if (maintainThread == null) {
-                            checkThread = maintainThread = new ThreadWorker(groupName + "-checker");
-                        }
+                        returnIfInCheckThread.set(true);
                     }
                 }
 
-                if (checkThread != null) {
-                    checkThread.innerSchedule(this, nextInterval);
-                }
-
-
                 if (random++ > 10000) random = 1;
-            }
 
+                return nextInterval;
+            }
 
             volatile long startLazyTime = 0;
             volatile int queueSizeSum = 0;
@@ -256,7 +253,7 @@ public class WorkerGroup extends AbstractExecutorService {
              * 1.新增(start)和收缩(stop)线程
              * 2.生成重平均任务
              */
-            final long check() {
+            final long toCheck() {
                 //空闲的ThreadProxy
                 List<ThreadProxy> idleList = new ArrayList<>();
                 //不空闲的ThreadProxy
@@ -354,7 +351,7 @@ public class WorkerGroup extends AbstractExecutorService {
                     }//~for
                 }//~if
 
-                return amount == maxAmount ? 200 : 60;
+                return amount == maxAmount ? idleInterval : minInterval;
             }
 
         };

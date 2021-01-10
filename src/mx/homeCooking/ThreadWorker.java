@@ -18,6 +18,7 @@ class ThreadWorker extends AbstractExecutorService {
     static final int commonTaskSignal = 1;
     static final int scheduleTaskSignal = 2;
     static final int shutDownSignal = 4;
+    static final int checkSetSignal = 8;
 
     final Signal signal = new Signal();
 
@@ -158,11 +159,13 @@ class ThreadWorker extends AbstractExecutorService {
                      * (2)下面的waitTime没有获取到刚加入的最小date,signal却没起作用
                      */
                     for (; ; ) {
+                        long nextCheckDate = tryCheckAndGetNextDate();
+                        long nextScheduleDate = md.get();
                         /**
                          * 取距离当前最小date需要await的值
                          * 如果没有调度任务,下面让线程await一个很长时间
                          */
-                        long waitTime = md.get() - System.currentTimeMillis();
+                        long waitTime = Math.min(nextScheduleDate, nextCheckDate) - System.currentTimeMillis();
 
                         if (waitTime > 0) {
                             try {
@@ -173,7 +176,11 @@ class ThreadWorker extends AbstractExecutorService {
                                  * await和set互斥,也就是await循环中不会错过任何一个set
                                  */
                                 if ((state = signal.takeState(waitTime, TimeUnit.MILLISECONDS)) == 0) {
-                                    break;
+                                    if (nextCheckDate < nextScheduleDate) {
+                                        continue;
+                                    }else{
+                                        break;
+                                    }
                                 }
 
                                 if (signal.is(state, shutDownSignal)) {
@@ -192,7 +199,12 @@ class ThreadWorker extends AbstractExecutorService {
                                      * 这个最后判断
                                      * 说明有更小的调度来了,重新计算waitTime,再次await
                                      */
+                                    continue;
+                                } else if (signal.is(state, checkSetSignal)) {
+
+                                    continue;
                                 }
+
                             } catch (InterruptedException e) {
                                 //被中断也会回到上面执行循环
                                 break;
@@ -245,6 +257,26 @@ class ThreadWorker extends AbstractExecutorService {
             terminationCDL.countDown();
         }//~run
     };
+
+    private volatile CheckTask checkTask;
+
+    void setCheckTask(CheckTask checkTask) {
+        this.checkTask = checkTask;
+        signal.set(checkSetSignal);
+    }
+
+    void clearCheckTask() {
+        this.checkTask = null;
+    }
+
+    long tryCheckAndGetNextDate() {
+        CheckTask check = checkTask;
+        if (check != null) {
+            return check.tryCheckAndGetNextDate();
+        } else {
+            return Long.MAX_VALUE;
+        }
+    }
 
     /**
      * 每一毫秒处理300万,要100年才能耗尽

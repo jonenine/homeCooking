@@ -5,8 +5,9 @@ import java.util.concurrent.AbstractExecutorService;
 public class WorkerGroups {
 
     /**
-     * 普通线程池,此线程池的线程数量会收缩,所以比较适合作为io操作池
-     * cpu核心数的大小似乎可以达到性能顶峰
+     * 普通线程池,此线程池的线程数量会收缩,当线程池数量达到最大值coreSize的时候
+     * 会关闭维护线程,并采用worker中随机线程来调度维护任务,也就是说维护任务可能会被所在线程队列前面的任务卡住
+     * 从而造成各个队列任务重平均工作执行频率下降
      */
     public static AbstractExecutorService executor(String groupName, int coreSize) {
         return new WorkerGroup(groupName, coreSize, false, false);
