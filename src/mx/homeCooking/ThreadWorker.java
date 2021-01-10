@@ -300,7 +300,7 @@ class ThreadWorker extends AbstractExecutorService {
          * 这里因为线程调度的原因,极少可能出现上面的offer进去的command都执行完了,才执行的下面的signal.set
          * 此时会将await循环提前唤醒
          */
-        signal.setAndAddExecuteCount(commonTaskSignal,1);
+        signal.setAndAddExecuteCount(commonTaskSignal, 1);
     }
 
     /**
@@ -311,7 +311,7 @@ class ThreadWorker extends AbstractExecutorService {
             throw new RejectedExecutionException();
         }
 
-        if(batch.isEmpty()) return;
+        if (batch.isEmpty()) return;
 
         if (!queue.addAll(batch)) {
             throw new RejectedExecutionException();
@@ -320,7 +320,7 @@ class ThreadWorker extends AbstractExecutorService {
         signal.setAndAddExecuteCount(commonTaskSignal, batch.size());
     }
 
-    final void signalExecuteCommonTask(int size){
+    final void signalExecuteCommonTask(int size) {
         signal.setAndAddExecuteCount(commonTaskSignal, size);
     }
 
@@ -519,7 +519,7 @@ class ThreadWorker extends AbstractExecutorService {
     }
 
 
-    void onShutdown(){
+    void onShutdown() {
 
     }
 
@@ -588,7 +588,7 @@ class ThreadWorker extends AbstractExecutorService {
     }
 
 
-    void pollAllScheduledTasks(Consumer<Runnable> task){
+    void pollAllScheduledTasks(Consumer<Runnable> task) {
         Map.Entry<Long, ScheduleCommandNode> entry;
         while ((entry = skipList.pollFirstEntry()) != null) {
             ScheduleCommandNode node = entry.getValue();
@@ -704,7 +704,6 @@ class ThreadWorker extends AbstractExecutorService {
             return steals;
         }
 
-
         /**
          * await之后会清除state,准备好下次的set
          */
@@ -714,7 +713,7 @@ class ThreadWorker extends AbstractExecutorService {
             int _state = state;
             try {
                 if (_state != 0 || notZero.await(timeout, unit)) {
-                    int res = _state;
+                    int res = state;
                     state = 0;
                     return res;
                 } else {
