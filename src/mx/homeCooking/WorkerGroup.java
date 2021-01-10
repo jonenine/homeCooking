@@ -215,7 +215,7 @@ public class WorkerGroup extends AbstractExecutorService {
                 }
             }
 
-            long check(AtomicBoolean returnIfInCheckThread) {
+            long check(AtomicBoolean returnIsInCheckThread) {
                 if (random++ > 10000) random = 1;
 
                 long nextInterval;
@@ -235,9 +235,9 @@ public class WorkerGroup extends AbstractExecutorService {
 
                 if (changeCheckThread) {
                     if (amount == maxAmount) {
-                        returnIfInCheckThread.set(false);
+                        returnIsInCheckThread.set(false);
                     } else {
-                        returnIfInCheckThread.set(true);
+                        returnIsInCheckThread.set(true);
                     }
                 }
 

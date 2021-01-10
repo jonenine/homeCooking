@@ -56,27 +56,41 @@ abstract class CheckTask {
         }
 
         if (nextDate <= now) {
+            /**
+             * 排他执行
+             */
             if (nextRunTime.compareAndSet(nextDate, Long.MAX_VALUE)) {
                 //默认是在维护线程内
-                AtomicBoolean checkThread = new AtomicBoolean(true);
-                long interval = check(checkThread);
+                AtomicBoolean isInCheckThread = new AtomicBoolean(true);
+                long interval = check(isInCheckThread);
                 nextDate = System.currentTimeMillis() + interval;
                 nextRunTime.set(nextDate);
 
-                if (checkThread.get()) {
+                if (isInCheckThread.get()) {
                     changeToCheckThread();
+                    //必须已经更新了nextRunTime
                     this.checkThread.innerSchedule(this::tryCheckAndGetNextDate, interval);
                 }else{
                     changeToWorkers();
                 }
+                //返回更新后的时间
+                return nextDate;
+            }else{
+                /**
+                 * 没有争抢上,返回一个最小间隔,对获取下次运行更有竞争性
+                 */
+                return now + minInterval;
             }
+        }else{
+            /**
+             * 没到时间,继续等待
+             */
+            return nextDate;
         }
-
-        return nextDate;
     }
 
 
-    abstract long check(AtomicBoolean returnIfInCheckThread);
+    abstract long check(AtomicBoolean returnIsInCheckThread);
 
 
 }
