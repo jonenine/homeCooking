@@ -1,5 +1,7 @@
 package mx.homeCooking;
 
+import sun.misc.Unsafe;
+
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -136,6 +138,18 @@ public class WorkerGroup extends AbstractExecutorService {
 
     volatile int random = 7;
 
+    private final static Unsafe unsafe;
+    private final static long randomAddress;
+    static {
+        try {
+            unsafe = UnsafeUtil.unsafe;
+            randomAddress = unsafe.objectFieldOffset
+                    (WorkerGroup.class.getDeclaredField("random"));
+        } catch (NoSuchFieldException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     /**
      * 随机算则线程来执行task,这个随机算法在入队线程较少的时候依赖random的改变
      * <p>
@@ -145,7 +159,7 @@ public class WorkerGroup extends AbstractExecutorService {
      */
     @Override
     public final void execute(Runnable task) {
-        int hash = (int) Thread.currentThread().getId() + random;
+        int hash = (int) Thread.currentThread().getId() + unsafe.getInt(this,randomAddress);
         int _mount = amount;
         while (_mount > 0) {
             /**
