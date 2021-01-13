@@ -1,5 +1,7 @@
 package mx.homeCooking;
 
+import sun.misc.Unsafe;
+
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -62,6 +64,8 @@ class ThreadWorker extends AbstractExecutorService {
         }
     }
 
+    volatile WorkerGroup group = null;
+
     private volatile boolean continueWorking;
 
     final Runnable worker = new Runnable() {
@@ -74,6 +78,7 @@ class ThreadWorker extends AbstractExecutorService {
         private final long fetchScheduleTasks(long firstDate) {
             final ConcurrentSkipListMap<Long, ScheduleCommandNode> sl = skipList;
             long now = System.currentTimeMillis();
+
             /**
              * 将所有到点的定时任务都取出,合并在一起
              */
@@ -117,6 +122,10 @@ class ThreadWorker extends AbstractExecutorService {
              * working
              */
             while (continueWorking) {
+                //if(group!=null){
+                //    group.updateRandom();
+                //}
+
                 /**
                  * 轮询所有超时的定时任务
                  */
@@ -178,7 +187,7 @@ class ThreadWorker extends AbstractExecutorService {
                                 if ((state = signal.takeState(waitTime, TimeUnit.MILLISECONDS)) == 0) {
                                     if (nextCheckDate < nextScheduleDate) {
                                         continue;
-                                    }else{
+                                    } else {
                                         break;
                                     }
                                 }

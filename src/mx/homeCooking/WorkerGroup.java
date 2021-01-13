@@ -6,6 +6,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -138,17 +139,46 @@ public class WorkerGroup extends AbstractExecutorService {
 
     volatile int random = 7;
 
+    private final UnsafeUtil uu = new UnsafeUtil();
     private final static Unsafe unsafe;
-    private final static long randomAddress;
+    private final static long randomOffset;
+
     static {
         try {
             unsafe = UnsafeUtil.unsafe;
-            randomAddress = unsafe.objectFieldOffset
+            /**
+             * 不如将这个地址交给线程0来修改
+             */
+            randomOffset = unsafe.objectFieldOffset
                     (WorkerGroup.class.getDeclaredField("random"));
         } catch (NoSuchFieldException e) {
             throw new RuntimeException(e);
         }
     }
+
+    /**
+     * random的修改必须绑定到线程,每访问一次就更新一次,否则意义不大
+     */
+    final void updateRandom() {
+        int r = unsafe.getInt(this, randomOffset);
+        unsafe.putOrderedInt(this, randomOffset, r > 65536 ? r % 17 : r + 17);
+    }
+
+    /**
+     * 快速算法
+     */
+    private final int generateHash1(Void nil) {
+        return (int) Thread.currentThread().getId() + unsafe.getInt(this, randomOffset);
+    }
+
+    /**
+     * 更均匀的算法
+     */
+    private final int generateHash2(Void nil) {
+        return ThreadLocalRandom.current().nextInt(4096);
+    }
+
+    volatile Function<Void, Integer> fp_hash = this::generateHash1;
 
     /**
      * 随机算则线程来执行task,这个随机算法在入队线程较少的时候依赖random的改变
@@ -159,7 +189,7 @@ public class WorkerGroup extends AbstractExecutorService {
      */
     @Override
     public final void execute(Runnable task) {
-        int hash = (int) Thread.currentThread().getId() + unsafe.getInt(this,randomAddress);
+        int hash = fp_hash.apply(null);
         int _mount = amount;
         while (_mount > 0) {
             /**
@@ -184,7 +214,7 @@ public class WorkerGroup extends AbstractExecutorService {
     public void executeTimeout(Runnable command, long delay, TimeUnit unit) {
         long timeoutInMillions = unit.toMillis(delay);
 
-        int hash = (int) Thread.currentThread().getId() + random;
+        int hash = (int) Thread.currentThread().getId() + unsafe.getInt(this, randomOffset);
         int _mount = amount;
         while (_mount > 0) {
             if (proxies[hash % _mount].executeTimeout(command, timeoutInMillions)) {
@@ -230,7 +260,7 @@ public class WorkerGroup extends AbstractExecutorService {
             }
 
             long check(AtomicBoolean returnIsInCheckThread) {
-                if (random++ > 10000) random = 1;
+                updateRandom();
 
                 long nextInterval;
                 /**
@@ -255,7 +285,7 @@ public class WorkerGroup extends AbstractExecutorService {
                     }
                 }
 
-                if (random++ > 10000) random = 1;
+                updateRandom();
 
                 return nextInterval;
             }
@@ -477,7 +507,7 @@ public class WorkerGroup extends AbstractExecutorService {
      * 调度任务在各业务中调度任务相对较少
      */
     ThreadProxy randomProxy() {
-        int hash = ThreadLocalRandom.current().nextInt(4096);
+        int hash = generateHash2(null);
         return proxies[hash % amount];
     }
 
@@ -522,6 +552,12 @@ public class WorkerGroup extends AbstractExecutorService {
                         throw new RejectedExecutionException();
                     }
                     worker = new ScheduledThreadWorker(groupName + "-" + index);
+                    /**
+                     * 让线程0更新随机数的值,因为线程0肯定是最后一个关闭的
+                     */
+                    if (index == 0) {
+                        worker.group = WorkerGroup.this;
+                    }
                     amount++;
                 }
             } finally {
@@ -632,6 +668,11 @@ public class WorkerGroup extends AbstractExecutorService {
                 ScheduledThreadWorker busyWorker = proxies[busyIndex].getWorker();
                 if (busyWorker == null || oldWorker != worker) return;
                 /**
+                 * 在重平衡期间,短暂的使用慢确更加均匀的hash算法,防止出现更加不平衡
+                 */
+                fp_hash = WorkerGroup.this::generateHash2;
+
+                /**
                  * 能进入下面代码,说明worker shutdown在这之后发生
                  * 这个任务运行在worker shutdown之前,不是销毁时假运行的任务
                  */
@@ -639,72 +680,72 @@ public class WorkerGroup extends AbstractExecutorService {
                 int shareSize = Math.round(busyQueueSize / 2f);
                 //从繁忙线程中窃取任务,此任务已经被取出,要尽量确保其不会丢失
                 List<Runnable> tasks = busyWorker.stealTask(shareSize);
-                if (tasks.isEmpty()) return;
-
-                boolean rebalanced = false;
-                /**
-                 * 和stop互斥,也就是和运维线程的stop操作和shutdown操作互斥
-                 */
-                final ReentrantReadWriteLock.ReadLock lock = readLock;
-                if (shrinkThreadPool) lock.lock();
-                try {
-                    if (worker != null) {
-                        try {
-                            worker.executeBatch(tasks);
-                            rebalanced = true;
-                        } catch (Exception e) {
-                            rebalanced = false;
-                        }
-                    }
-                } finally {
-                    if (shrinkThreadPool) lock.unlock();
-                }
-
-                /**
-                 * 由于在上面return语句和lock语句之间,worker被shutdown了,可能性不大,但不会没有
-                 * 1.executed失败如果是group shutdown引起的
-                 * 此时alreadyShutDown(group shutdown在各个worker shutdown之前)肯定是true
-                 * 2.worker被运维线程shutdown了,目前是此线程真运行的最后一个任务,将这些任务再分散入到group的所有线程队列中去
-                 */
-                Runnable task = null;
-                if (!rebalanced) {
-                    Iterator<Runnable> itor = tasks.iterator();
-                    if (!alreadyShutDown) {
-                        while (itor.hasNext()) {
-                            task = itor.next();
+                if (!tasks.isEmpty()) {
+                    boolean rebalanced = false;
+                    /**
+                     * 和stop互斥,也就是和运维线程的stop操作和shutdown操作互斥
+                     */
+                    final ReentrantReadWriteLock.ReadLock lock = readLock;
+                    if (shrinkThreadPool) lock.lock();
+                    try {
+                        if (worker != null) {
                             try {
-                                WorkerGroup.this.execute(task);
-                                random++;
-                                task = null;
+                                worker.executeBatch(tasks);
+                                rebalanced = true;
                             } catch (Exception e) {
-                                break;
+                                rebalanced = false;
                             }
                         }
+                    } finally {
+                        if (shrinkThreadPool) lock.unlock();
                     }
 
                     /**
-                     * 如果在分散插入到group的过程中,group shutdown导致插入报错
-                     * 此时仍是真运行的最后一个任务,将这这些任务直接插入oldWorker的队列中,可以确保这些任务被正确回收
-                     * 此时worker已经失效了,所以要用oldWorker
+                     * 由于在上面return语句和lock语句之间,worker被shutdown了,可能性不大,但不会没有
+                     * 1.executed失败如果是group shutdown引起的
+                     * 此时alreadyShutDown(group shutdown在各个worker shutdown之前)肯定是true
+                     * 2.worker被运维线程shutdown了,目前是此线程真运行的最后一个任务,将这些任务再分散入到group的所有线程队列中去
                      */
-                    ConcurrentLinkedQueue<Runnable> queue = oldWorker.queue;
-                    int offerSize = 0;
-                    //插入上面报错的那个任务
-                    if (task != null) {
-                        queue.offer(task);
-                        offerSize++;
-                    }
+                    Runnable task = null;
+                    if (!rebalanced) {
+                        Iterator<Runnable> itor = tasks.iterator();
+                        if (!alreadyShutDown) {
+                            while (itor.hasNext()) {
+                                task = itor.next();
+                                try {
+                                    WorkerGroup.this.execute(task);
+                                    //updateRandom();
+                                    task = null;
+                                } catch (Exception e) {
+                                    break;
+                                }
+                            }
+                        }
 
-                    while (itor.hasNext()) {
-                        task = itor.next();
-                        queue.offer(task);
-                        offerSize++;
-                    }
+                        /**
+                         * 如果在分散插入到group的过程中,group shutdown导致插入报错
+                         * 此时仍是真运行的最后一个任务,将这这些任务直接插入oldWorker的队列中,可以确保这些任务被正确回收
+                         * 此时worker已经失效了,所以要用oldWorker
+                         */
+                        ConcurrentLinkedQueue<Runnable> queue = oldWorker.queue;
+                        int offerSize = 0;
+                        //插入上面报错的那个任务
+                        if (task != null) {
+                            queue.offer(task);
+                            offerSize++;
+                        }
 
-                    oldWorker.signalExecuteCommonTask(offerSize);
-                }//~ not rebalanced
+                        while (itor.hasNext()) {
+                            task = itor.next();
+                            queue.offer(task);
+                            offerSize++;
+                        }
 
+                        oldWorker.signalExecuteCommonTask(offerSize);
+                    }//~ not rebalanced
+                }
 
+                fp_hash = WorkerGroup.this::generateHash1;
                 //System.err.println("----" + index + " steal from:" + busyIndex + "/计划窃取数量:" + shareSize + "/实际窃取数量" + tasks.size());
             };
         }
