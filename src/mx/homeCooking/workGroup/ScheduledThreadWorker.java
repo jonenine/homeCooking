@@ -1,4 +1,4 @@
-package mx.homeCooking;
+package mx.homeCooking.workGroup;
 
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
