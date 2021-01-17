@@ -7,11 +7,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * 主要作为生产者和消费者这件的缓冲使用
+ * 主要作为生产者和消费者之间的缓冲使用
  */
 public class QueuedBuffer<E> {
-
-    static final int arraySize = 200;
 
     static final Unsafe unsafe = UnsafeUtil.unsafe;
 
@@ -69,10 +67,10 @@ public class QueuedBuffer<E> {
                  * 找到readSeg,headSegment是谁无所谓
                  */
                 SegmentNode<E> readSeg = headSegment;
-                while (readSeq >= readSeg.nextStartSequence) {
+                while (readSeq >= readSeg.startSequence + readSeg.itemSize) {
                     readSeg = readSeg.next;
                     //查找过程中,head move on
-                    if (readSeg == null)  readSeg = headSegment;
+                    if (readSeg == null) readSeg = headSegment;
                 }
 
                 E e = (E) readSeg.read((int) (readSeq - readSeg.startSequence));
@@ -100,10 +98,8 @@ public class QueuedBuffer<E> {
 
     protected final E read() {
         for (; ; ) {
-
-            ReadHandler handler = readHandler;
-
             E e;
+            ReadHandler handler = readHandler;
             if ((e = handler.read()) != null) {
                 return e;
             } else {
@@ -201,7 +197,7 @@ public class QueuedBuffer<E> {
 
 
     public QueuedBuffer() {
-        headSegment = tailSegment = new ArraySegmentNode(0, arraySize);
+        headSegment = tailSegment = new ArraySegmentNode(0);
         readHandler = new ReadHandler(tailSegment, 0);
     }
 

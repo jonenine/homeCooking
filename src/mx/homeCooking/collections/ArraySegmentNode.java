@@ -1,9 +1,7 @@
 package mx.homeCooking.collections;
 
 /**
- * 应该导出一个接口
- * 内存压缩型和持久化(合并)型
- * 这个代码的合理性,应该在这个接口上探讨
+ * 创建一个固定元素大小的,基于jvm对象数组的Segment
  */
 class ArraySegmentNode<E> extends SegmentNode<E> {
 
@@ -25,11 +23,13 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
         }
     }
 
+    final static int arraySize = 200;
+
     private final Object[] array;
 
-    ArraySegmentNode(long startSequence, int size) {
-        super(startSequence, size);
-        this.array = new Object[size];
+    ArraySegmentNode(long startSequence) {
+        super(startSequence);
+        this.array = new Object[arraySize];
     }
 
 
@@ -48,10 +48,9 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
     volatile int readCount = 0;
 
 
-
     @Override
     public boolean incrementReadCount() {
-        if (QueuedBuffer.unsafe.getAndAddInt(this, readCountOffset, 1) == size - 1) {
+        if (QueuedBuffer.unsafe.getAndAddInt(this, readCountOffset, 1) == itemSize - 1) {
             read = true;
         }
 
@@ -62,12 +61,13 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
     @Override
     public boolean writeOrLink(E e) {
         int index = getAndIncrementWriteCount();
-        if (index < size) {
+        if (index < itemSize) {
             array[index] = e;
             return true;
         } else {
             if (next == null) {
-                linkNext(new ArraySegmentNode(nextStartSequence, size));
+                this.itemSize = arraySize;
+                linkNext(new ArraySegmentNode(startSequence + arraySize));
             }
 
             return false;
@@ -76,7 +76,7 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
 
     @Override
     public E read(int index) {
-        if (index >= 0 && index < size) {
+        if (index >= 0 && index < itemSize) {
             return (E) array[index];
         } else {
             return null;

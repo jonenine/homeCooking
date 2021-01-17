@@ -3,13 +3,15 @@ package mx.homeCooking.collections;
 abstract class SegmentNode<E> {
 
     protected final long startSequence;
-    protected final long nextStartSequence;
-    protected final int size;
+    /**
+     * 在写完毕之后,必须要设置itemSize
+     * 比如一个自己管理内存的Segment,当到超出已经申请的内存大小时
+     * write返回false(link),而且要设置itemSize
+     */
+    protected volatile int itemSize;
 
-    SegmentNode(long startSequence, int size) {
+    SegmentNode(long startSequence) {
         this.startSequence = startSequence;
-        this.nextStartSequence = startSequence + size;
-        this.size = size;
     }
 
     protected volatile SegmentNode<E> next;
