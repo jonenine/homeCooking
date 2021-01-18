@@ -10,14 +10,12 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
 
     static final Unsafe unsafe = UnsafeUtil.unsafe;
     static final long nextOffset;
-    static final long writeIndexOffset;
 
     static {
+
         try {
             nextOffset = unsafe.objectFieldOffset
                     (ArraySegmentNode.class.getDeclaredField("next"));
-            writeIndexOffset = unsafe.objectFieldOffset
-                    (ArraySegmentNode.class.getDeclaredField("writeIndex"));
         } catch (NoSuchFieldException e) {
             throw new RuntimeException(e);
         }
@@ -37,11 +35,9 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
         return unsafe.compareAndSwapObject(this, nextOffset, null, next);
     }
 
-    volatile int writeIndex = 0;
-
     @Override
     public boolean writeOrLink(E e) {
-        int index = unsafe.getAndAddInt(this, writeIndexOffset, 1);
+        int index = getAndIncrementWriteIndex();
         if (index < itemSize) {
             array[index] = e;
             return true;
@@ -49,7 +45,7 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
             if (next == null) {
                 /**
                  * 注意要先link,再设置itemSize
-                 * {@link  QueuedBuffer#getTailSegmentSnapshot}
+                 * {@link  QueuedCache#getTailSegmentSnapshot}
                  */
                 linkNext(new ArraySegmentNode(startSequence + ARRAY_SIZE));
                 this.itemSize = ARRAY_SIZE;

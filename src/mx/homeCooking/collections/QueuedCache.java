@@ -3,13 +3,15 @@ package mx.homeCooking.collections;
 import mx.homeCooking.UnsafeUtil;
 import sun.misc.Unsafe;
 
+import java.util.AbstractQueue;
+import java.util.Iterator;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 主要作为生产者和消费者之间的缓冲使用
  */
-public class QueuedBuffer<E> {
+public class QueuedCache<E> extends AbstractQueue<E> {
 
     static final Unsafe unsafe = UnsafeUtil.unsafe;
 
@@ -20,11 +22,11 @@ public class QueuedBuffer<E> {
     static {
         try {
             headSegmentOffset = unsafe.objectFieldOffset
-                    (QueuedBuffer.class.getDeclaredField("headSegment"));
+                    (QueuedCache.class.getDeclaredField("headSegment"));
             tailSegmentOffset = unsafe.objectFieldOffset
-                    (QueuedBuffer.class.getDeclaredField("tailSegment"));
+                    (QueuedCache.class.getDeclaredField("tailSegment"));
             readHandlerOffset = unsafe.objectFieldOffset
-                    (QueuedBuffer.class.getDeclaredField("readHandler"));
+                    (QueuedCache.class.getDeclaredField("readHandler"));
         } catch (NoSuchFieldException e) {
             throw new RuntimeException(e);
         }
@@ -107,6 +109,7 @@ public class QueuedBuffer<E> {
         return readSeg;
     }
 
+    @Override
     public E peek() {
         long readSeq;
         E e;
@@ -123,7 +126,7 @@ public class QueuedBuffer<E> {
     }
 
     /**
-     * 因为tail实际上是writing segment,所以进入tail读取的时候是要加锁的
+     * tail实际上是writing segment,进入tail时候是要加锁的
      */
     private final ReentrantLock closeTailLock = new ReentrantLock();
 
@@ -133,7 +136,7 @@ public class QueuedBuffer<E> {
         for (; ; ) {
             E e;
             ReadHandler handler = readHandler;
-            if ((e = handler.read()) != null)  return e;
+            if ((e = handler.read()) != null) return e;
             else {
                 /**
                  * handler.read返回null,handler已经overflow
@@ -143,21 +146,19 @@ public class QueuedBuffer<E> {
                 lock.lock();
                 try {
                     SegmentNode<E> tailSnapshot;
-                    if ((tailSnapshot = handler.tailSegmentSnapshot) == tailSegment) {//在消费的过程中,write没有让tail move on
+                    if ((tailSnapshot = handler.tailSegmentSnapshot) == tailSegment) {
                         /**
-                         * 并不意味着所有的读线程都读完了
+                         * tail没有move on,就在在lock中直接读取tail
+                         * 此时虽然handler已经overflow,并不意味着所有的读线程都读完了
                          * 也就是,除了当前线程已经返回外,可能还有其他线程正在handler.read中
-                         * 下面进行一个延时等待,等待所有线程都读完
+                         * 下面进行一个延时等待,等待所有线程都读完,也就是等待readSequence变成writeSequenceSnapshot
+                         * 这个等待会让写慢读快情境下,队列的效率较低.不过这个类应对的场景就是写快读慢
                          */
                         while (readSequence.get() < handler.writeSequenceSnapshot) {
                             //just wait a moment
                             Thread.yield();
                         }
 
-                        /**
-                         * handler.read返回null,说明已经handler已经失效了
-                         * 在lock中直接读
-                         */
                         e = tailSnapshot.itemAt((int) (readSequence.get() - tailSnapshot.startSequence));
 
                         //可能会读到tail后面的segment去
@@ -174,7 +175,7 @@ public class QueuedBuffer<E> {
                         }
 
                         return e;
-                    }else{
+                    } else {
                         /**
                          * tailSegment相对于tailSegmentSnapshot已经move on,readHandler已经溢出,所以要更新readHandler
                          */
@@ -182,9 +183,9 @@ public class QueuedBuffer<E> {
                             /**
                              * 可能正在读tail的过程中,发生了tailSegment move on,此时readSequence可能已经读了几个值了
                              */
-                            long readSeq =  Math.max(readSequence.get(),handler.writeSequenceSnapshot);
+                            long readSeq = Math.max(readSequence.get(), handler.writeSequenceSnapshot);
                             unsafe.compareAndSwapObject(this, readHandlerOffset, handler,
-                                    new ReadHandler(getTailSegmentSnapshot(),readSeq));
+                                    new ReadHandler(getTailSegmentSnapshot(), readSeq));
                         }
                     }
                 } finally {
@@ -206,16 +207,16 @@ public class QueuedBuffer<E> {
         }
     }
 
-
+    @Override
     public E poll() {
         return read();
     }
 
+    @Override
     public boolean offer(E e) {
         write(e);
         return true;
     }
-
 
     /**
      * 末尾的segment,通常是正在写入的segment
@@ -268,14 +269,32 @@ public class QueuedBuffer<E> {
     }
 
 
-    public QueuedBuffer(int maxReadItemSize) {
+    public QueuedCache(int maxReadItemSize) {
         this.maxReadItemSize = maxReadItemSize;
         headSegment = tailSegment = new ArraySegmentNode(0);
         readHandler = new ReadHandler(tailSegment, 0);
     }
 
-    public QueuedBuffer() {
+    public QueuedCache() {
         this(-1);
+    }
+
+    /**
+     * 无法迭代
+     * @return
+     */
+    @Override
+    public Iterator<E> iterator() {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * 因为是无界队列,所以可能出现无法返回的数字
+     * 所以这个方法意义不大
+     */
+    @Override
+    public int size() {
+        return (int) (tailSegment.startSequence + tailSegment.writeIndex - readSequence.get());
     }
 
 }

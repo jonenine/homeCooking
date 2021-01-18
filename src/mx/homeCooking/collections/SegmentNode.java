@@ -7,11 +7,15 @@ abstract class SegmentNode<E> {
 
     static final Unsafe unsafe = UnsafeUtil.unsafe;
     static final long readCountOffset;
+    static final long writeIndexOffset;
+
 
     static {
         try {
             readCountOffset = unsafe.objectFieldOffset
                     (ArraySegmentNode.class.getDeclaredField("readCount"));
+            writeIndexOffset = unsafe.objectFieldOffset
+                    (ArraySegmentNode.class.getDeclaredField("writeIndex"));
         } catch (NoSuchFieldException e) {
             throw new RuntimeException(e);
         }
@@ -48,6 +52,15 @@ abstract class SegmentNode<E> {
         }
 
         return read;
+    }
+
+    /**
+     * 下一个要写入的索引
+     */
+    volatile int writeIndex = 0;
+
+    public int getAndIncrementWriteIndex(){
+        return unsafe.getAndAddInt(this, writeIndexOffset, 1);
     }
 
     /**
