@@ -125,7 +125,7 @@ public class QueuedBuffer<E> {
     /**
      * 因为tail实际上是writing segment,所以进入tail读取的时候是要加锁的
      */
-    private final ReentrantLock readInTailLock = new ReentrantLock();
+    private final ReentrantLock closeTailLock = new ReentrantLock();
 
     volatile ReadHandler readHandler;
 
@@ -133,51 +133,63 @@ public class QueuedBuffer<E> {
         for (; ; ) {
             E e;
             ReadHandler handler = readHandler;
-            if ((e = handler.read()) != null) {
-                return e;
-            } else {
+            if ((e = handler.read()) != null)  return e;
+            else {
                 /**
-                 * handler.read返回null,handler肯定已经overflow,但并不意味着所有的读线程都读完了
-                 * 也就是,除了当前线程已经返回外,可能还有其他线程正在handler.read中
-                 * 下面进行一个延时等待,等待所有线程都读完
-                 * todo:这里以后还可以加入一个阻塞,用于支持持久化和反持久化
+                 * handler.read返回null,handler已经overflow
+                 * 下面这一段必须同步
                  */
-                while (readSequence.get() < handler.writeSequenceSnapshot) {
-                    //just wait a moment
-                    Thread.yield();
-                }
+                final ReentrantLock lock = closeTailLock;
+                lock.lock();
+                try {
+                    SegmentNode<E> tailSnapshot;
+                    if ((tailSnapshot = handler.tailSegmentSnapshot) == tailSegment) {//在消费的过程中,write没有让tail move on
+                        /**
+                         * 并不意味着所有的读线程都读完了
+                         * 也就是,除了当前线程已经返回外,可能还有其他线程正在handler.read中
+                         * 下面进行一个延时等待,等待所有线程都读完
+                         */
+                        while (readSequence.get() < handler.writeSequenceSnapshot) {
+                            //just wait a moment
+                            Thread.yield();
+                        }
 
-                SegmentNode<E> tailSnapshot;
-                if ((tailSnapshot= handler.tailSegmentSnapshot) == tailSegment) {//在消费的过程中,write没有让tail move on
-                    /**
-                     * handler.read返回null,说明已经handler已经失效了
-                     * 在lock中直接读
-                     */
-                    final ReentrantLock lock = readInTailLock;
-                    lock.lock();
-                    try {
+                        /**
+                         * handler.read返回null,说明已经handler已经失效了
+                         * 在lock中直接读
+                         */
                         e = tailSnapshot.itemAt((int) (readSequence.get() - tailSnapshot.startSequence));
+
+                        //可能会读到tail后面的segment去
                         if (e != null) {
                             readSequence.incrementAndGet();
                             if (tailSnapshot.incrementReadCount()) {
                                 /**
                                  * 这很有可能会让head跑到tail的前面去,而此时handler已经溢出,无用
                                  * 等待tail move on,再进入下面的else中创建新的handler
+                                 * tail都读完了,说明tail早就都写完了,也就是已经link next.会让head move on到tail的next上去
                                  */
                                 moveOnHeadSegment();
                             }
                         }
-                    } finally {
-                        lock.unlock();
-                    }
-                    return e;
-                } else {//tailSegment相对于tailSegmentSnapshot已经move on,readHandler已经溢出,所以要更新readHandler
-                    if (handler == readHandler) {
-                        unsafe.compareAndSwapObject(this, readHandlerOffset, handler,
-                                new ReadHandler(getTailSegmentSnapshot(), readSequence.get()));
-                    }
-                }
 
+                        return e;
+                    }else{
+                        /**
+                         * tailSegment相对于tailSegmentSnapshot已经move on,readHandler已经溢出,所以要更新readHandler
+                         */
+                        if (handler == readHandler) {
+                            /**
+                             * 可能正在读tail的过程中,发生了tailSegment move on,此时readSequence可能已经读了几个值了
+                             */
+                            long readSeq =  Math.max(readSequence.get(),handler.writeSequenceSnapshot);
+                            unsafe.compareAndSwapObject(this, readHandlerOffset, handler,
+                                    new ReadHandler(getTailSegmentSnapshot(),readSeq));
+                        }
+                    }
+                } finally {
+                    lock.unlock();
+                }
             }
         }
     }
