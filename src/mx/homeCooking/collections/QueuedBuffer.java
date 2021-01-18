@@ -32,11 +32,17 @@ public class QueuedBuffer<E> {
 
     /**
      * 表示下一次要读的位置
+     * readSequence最大可以读到的值为tailSegmentSnapshot的prev的segment的值
      */
     final AtomicLong readSequence = new AtomicLong(0);
 
-    class ReadHandler {
-        final SegmentNode<E> writingSegment;
+    /**
+     * 保持对象创建时tail的snapshot和readSequence的一个副本
+     * readSequenceCopy永远自增
+     * 当readSequenceCopy==tail snapshot的startSeq时,此handler溢出作废,需要再创建一个新的handler
+     */
+    private final class ReadHandler {
+        final SegmentNode<E> tailSegmentSnapshot;
         /**
          * 可以理解为是下一个要写入的位置的snapshot
          * 在这之前的位置已经全部读取完毕
@@ -48,7 +54,7 @@ public class QueuedBuffer<E> {
         final AtomicLong readSequenceCopy;
 
         ReadHandler(SegmentNode<E> tailSegment, long readSequence) {
-            writingSegment = tailSegment;
+            tailSegmentSnapshot = tailSegment;
             writeSequenceSnapshot = tailSegment.startSequence;
             readSequenceCopy = new AtomicLong(readSequence);
         }
@@ -62,21 +68,17 @@ public class QueuedBuffer<E> {
              * 返回当前要读的位置,并将readSequence指向下一个位置
              */
             long readSeq = readSequenceCopy.getAndIncrement();
+            //不可能读到tail snapshot,也就是writingSegment
             if (readSeq < writeSequenceSnapshot) {
                 /**
                  * 找到readSeg,headSegment是谁无所谓
                  */
-                SegmentNode<E> readSeg = headSegment;
-                while (readSeq >= readSeg.startSequence + readSeg.itemSize) {
-                    readSeg = readSeg.next;
-                    //查找过程中,head move on
-                    if (readSeg == null) readSeg = headSegment;
-                }
+                SegmentNode<E> readSeg = findSegmentNode(readSeq);
 
                 E e = (E) readSeg.read((int) (readSeq - readSeg.startSequence));
 
                 readSequence.getAndIncrement();
-                if (readSeg.incrementReadCount()) {
+                if (readSeg.read) {
                     moveOnHeadSegment();
                 }
 
@@ -89,10 +91,41 @@ public class QueuedBuffer<E> {
                 return null;
             }
         }
-
     }
 
-    private final ReentrantLock headCloseTailLock = new ReentrantLock();
+    /**
+     * readSeq肯定在headSegment的后面
+     */
+    private final SegmentNode<E> findSegmentNode(long readSeq) {
+        SegmentNode<E> readSeg = headSegment;
+        while (readSeq >= readSeg.startSequence + readSeg.itemSize) {
+            readSeg = readSeg.next;
+            //查找过程中,head move on
+            if (readSeg == null) readSeg = headSegment;
+        }
+
+        return readSeg;
+    }
+
+    public E peek() {
+        long readSeq;
+        E e;
+        /**
+         * 用自旋来更精确的实现peek
+         */
+        do {
+            readSeq = readSequence.get();
+            SegmentNode<E> readSeg = findSegmentNode(readSeq);
+            e = (E) readSeg.itemAt((int) (readSeq - readSeg.startSequence));
+        } while (readSeq != readSequence.get());
+
+        return e;
+    }
+
+    /**
+     * 因为tail实际上是writing segment,所以进入tail读取的时候是要加锁的
+     */
+    private final ReentrantLock readInTailLock = new ReentrantLock();
 
     volatile ReadHandler readHandler;
 
@@ -107,32 +140,26 @@ public class QueuedBuffer<E> {
                  * handler.read返回null,handler肯定已经overflow,但并不意味着所有的读线程都读完了
                  * 也就是,除了当前线程已经返回外,可能还有其他线程正在handler.read中
                  * 下面进行一个延时等待,等待所有线程都读完
+                 * todo:这里以后还可以加入一个阻塞,用于支持持久化和反持久化
                  */
                 while (readSequence.get() < handler.writeSequenceSnapshot) {
                     //just wait a moment
                     Thread.yield();
                 }
 
-                /**
-                 * handler.read返回null,说明已经handler已经失效了
-                 */
-                final ReentrantLock lock = headCloseTailLock;
-
-                if (handler != readHandler) continue;
-                SegmentNode<E> writingSegment = handler.writingSegment;
-                /**
-                 * 在消费的过程中,write没有让tail move on
-                 */
-                if (writingSegment == tailSegment) {
+                SegmentNode<E> tailSnapshot;
+                if ((tailSnapshot= handler.tailSegmentSnapshot) == tailSegment) {//在消费的过程中,write没有让tail move on
                     /**
-                     * 不再使用handler,在lock中直接读
+                     * handler.read返回null,说明已经handler已经失效了
+                     * 在lock中直接读
                      */
+                    final ReentrantLock lock = readInTailLock;
                     lock.lock();
                     try {
-                        e = writingSegment.read((int) (readSequence.get() - writingSegment.startSequence));
+                        e = tailSnapshot.itemAt((int) (readSequence.get() - tailSnapshot.startSequence));
                         if (e != null) {
                             readSequence.incrementAndGet();
-                            if (writingSegment.incrementReadCount()) {
+                            if (tailSnapshot.incrementReadCount()) {
                                 /**
                                  * 这很有可能会让head跑到tail的前面去,而此时handler已经溢出,无用
                                  * 等待tail move on,再进入下面的else中创建新的handler
@@ -144,12 +171,10 @@ public class QueuedBuffer<E> {
                         lock.unlock();
                     }
                     return e;
-                } else {
-                    /**
-                     * tailSegment相对于tailSegmentSnapshot已经move on,readHandler已经溢出,所以要更新readHandler
-                     */
+                } else {//tailSegment相对于tailSegmentSnapshot已经move on,readHandler已经溢出,所以要更新readHandler
                     if (handler == readHandler) {
-                        unsafe.compareAndSwapObject(this, readHandlerOffset, handler, new ReadHandler(tailSegment, readSequence.get()));
+                        unsafe.compareAndSwapObject(this, readHandlerOffset, handler,
+                                new ReadHandler(getTailSegmentSnapshot(), readSequence.get()));
                     }
                 }
 
@@ -157,11 +182,26 @@ public class QueuedBuffer<E> {
         }
     }
 
+
     protected final void write(E e) {
+        /**
+         * 写tailSegment,直到写满后再move on tail
+         * 这里默认tailSegment就是writing segment,不再优化为多读少写
+         */
         SegmentNode t;
         while (!(t = tailSegment).writeOrLink(e)) {
             unsafe.compareAndSwapObject(this, tailSegmentOffset, t, t.next);
         }
+    }
+
+
+    public E poll() {
+        return read();
+    }
+
+    public boolean offer(E e) {
+        write(e);
+        return true;
     }
 
 
@@ -172,8 +212,9 @@ public class QueuedBuffer<E> {
 
 
     /**
-     * head节点就是保持node在内存用的,一旦head后移,前面的节点在消费完毕之后就会就释放
+     * 1.head节点保持node在内存用的,一旦head后移,前面的节点在消费完毕之后就会就释放
      * 除此之外headSegment没有其他意义
+     * 2.read方法从head开始遍历链表
      */
     volatile SegmentNode<E> headSegment;
 
@@ -195,10 +236,34 @@ public class QueuedBuffer<E> {
         }
     }
 
+    /**
+     * 一个handler最多允许读的item的数量
+     * 这个值可以设置的小一些用来支持持久化
+     */
+    final int maxReadItemSize;
 
-    public QueuedBuffer() {
+    private SegmentNode<E> getTailSegmentSnapshot() {
+        if (maxReadItemSize == -1) return tailSegment;
+        int count = 0;
+        SegmentNode<E> h = headSegment;
+        int itemSize;
+        while ((itemSize = h.itemSize) != 0 && (count += itemSize) < maxReadItemSize) {
+            //itemSize不为0,next肯定不是null
+            h = h.next;
+        }
+
+        return h.next == null ? h : h.next;
+    }
+
+
+    public QueuedBuffer(int maxReadItemSize) {
+        this.maxReadItemSize = maxReadItemSize;
         headSegment = tailSegment = new ArraySegmentNode(0);
         readHandler = new ReadHandler(tailSegment, 0);
+    }
+
+    public QueuedBuffer() {
+        this(-1);
     }
 
 }
