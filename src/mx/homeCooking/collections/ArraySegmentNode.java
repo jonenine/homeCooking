@@ -45,7 +45,7 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
             if (next == null) {
                 /**
                  * 注意要先link,再设置itemSize
-                 * {@link  QueuedCache#getTailSegmentSnapshot}
+                 * {@link  QueuedCache#getTailSegmentSnapshot,QueuedCache#findSegmentNode}
                  */
                 linkNext(new ArraySegmentNode(startSequence + ARRAY_SIZE));
                 this.itemSize = ARRAY_SIZE;
