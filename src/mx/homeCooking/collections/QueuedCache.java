@@ -69,38 +69,37 @@ public class QueuedCache<E> extends AbstractQueue<E> {
      * 当readSequenceCopy==tail snapshot的startSeq时,此handler溢出作废,需要再创建一个新的handler
      */
     private final class ReadHandler {
+
         final SegmentNode<E> tailSegmentSnapshot;
         /**
          * 可以理解为是下一个要写入的位置的snapshot
          * 在这之前的位置已经全部读取完毕
          */
-        final long writeSequenceSnapshot;
+        private final long writeSequenceSnapshot;
         /**
-         * readSequence的副本,一旦超过writeSequenceSnapshot,这个handler就失效了,就要换一个handler了
+         * 下一个要读取的位置
+         * 一旦超过writeSequenceSnapshot,这个handler就失效了,就要换一个handler了
          */
-        final AtomicLong readSequenceCopy;
+        private final AtomicLong readSequence;
 
         ReadHandler(long readSequence) {
             tailSegmentSnapshot = getTailSegmentSnapshot();
             writeSequenceSnapshot = tailSegmentSnapshot.startSequence;
-            readSequenceCopy = new AtomicLong(readSequence);
+            this.readSequence = new AtomicLong(readSequence);
         }
 
-        long readSequence() {
-            long readSeg = readSequenceCopy.get();
+        long getReadSequence() {
+            long readSeg = readSequence.get();
             return readSeg < writeSequenceSnapshot ? readSeg : writeSequenceSnapshot + readTailSegmentCount;
         }
 
-        volatile boolean overflow = false;
+        private volatile boolean overflow = false;
 
         E readConcurrently() {
             if (overflow) return null;
-            /**
-             * 返回当前要读的位置,并将readSequence指向下一个位置
-             */
-            long readSeq = readSequenceCopy.getAndIncrement();
-            //不可能读到tail snapshot,也就是writingSegment
-            if (readSeq < writeSequenceSnapshot) {
+
+            long readSeq;
+            if ((readSeq = readSequence.getAndIncrement()) < writeSequenceSnapshot) {//不可能读到tailSegmentSnapshot
                 /**
                  * 找到readSeg,headSegment是谁无所谓
                  */
@@ -125,7 +124,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
         /**
          * 在handler overflow后,在lock中读取tailSegmentSnapshot的计数
          */
-        volatile int readTailSegmentCount = 0;
+        private volatile int readTailSegmentCount = 0;
 
         /**
          * 下面的方法在lock中调用
@@ -245,16 +244,13 @@ public class QueuedCache<E> extends AbstractQueue<E> {
                         /**
                          * tailSegment相对于tailSegmentSnapshot已经move on,readHandler已经溢出,所以要更新readHandler
                          */
-                        /**
-                         * 可能正在读tail的过程中,发生了tailSegment move on,此时readSequence可能已经读了几个值了
-                         */
-                        long readSeq = handler.writeSequenceSnapshot + handler.readTailSegmentCount;
                         if (handler == readHandler) {
                             /**
                              * 虽然tail已经区别于tail snapshot,,但可能tail snapshot已经被读完
                              * 造成head move on,而且head=tail,下次再读的时候还是在lock中读
                              */
-                            unsafe.compareAndSwapObject(this, readHandlerOffset, handler, new ReadHandler(readSeq));
+                            unsafe.compareAndSwapObject(this, readHandlerOffset, handler,
+                                    new ReadHandler(handler.getReadSequence()));
                         }
                     }
                 } finally {
@@ -326,7 +322,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
     @Override
     public int size() {
         SegmentNode<E> t = tailSegment;
-        return (int) (t.startSequence + t.writeIndex - readHandler.readSequence());
+        return (int) (t.startSequence + t.writeIndex - readHandler.getReadSequence());
     }
 
 
@@ -336,11 +332,11 @@ public class QueuedCache<E> extends AbstractQueue<E> {
     @Override
     public E peek() {
         E e;
-        long seq = readHandler.readSequence();
+        long seq = readHandler.getReadSequence();
         do {
             SegmentNode<E> seg = findSegmentNode(seq);
             e = (E) seg.itemAt((int) (seq - seg.startSequence));
-        } while (seq != (seq = readHandler.readSequence()));
+        } while (seq != (seq = readHandler.getReadSequence()));
 
         return e;
     }
