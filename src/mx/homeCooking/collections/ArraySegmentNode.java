@@ -10,10 +10,13 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
 
     static final Unsafe unsafe = UnsafeUtil.unsafe;
     static final long nextOffset;
+    static final long readCountOffset;
 
     static {
 
         try {
+            readCountOffset = unsafe.objectFieldOffset
+                    (ArraySegmentNode.class.getDeclaredField("readCount"));
             nextOffset = unsafe.objectFieldOffset
                     (ArraySegmentNode.class.getDeclaredField("next"));
         } catch (NoSuchFieldException e) {
@@ -62,6 +65,19 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
         }
 
         return null;
+    }
+
+    /**
+     * 已读计数+1,如果读的数量==size,则返回true
+     */
+    volatile int readCount = 0;
+
+    public boolean incrementReadCount() {
+        if (unsafe.getAndAddInt(this, readCountOffset, 1) == itemSize - 1) {
+            read = true;
+        }
+
+        return read;
     }
 
 

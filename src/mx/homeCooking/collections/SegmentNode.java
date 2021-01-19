@@ -6,14 +6,11 @@ import sun.misc.Unsafe;
 abstract class SegmentNode<E> {
 
     static final Unsafe unsafe = UnsafeUtil.unsafe;
-    static final long readCountOffset;
-    static final long writeIndexOffset;
 
+    static final long writeIndexOffset;
 
     static {
         try {
-            readCountOffset = unsafe.objectFieldOffset
-                    (ArraySegmentNode.class.getDeclaredField("readCount"));
             writeIndexOffset = unsafe.objectFieldOffset
                     (ArraySegmentNode.class.getDeclaredField("writeIndex"));
         } catch (NoSuchFieldException e) {
@@ -21,47 +18,49 @@ abstract class SegmentNode<E> {
         }
     }
 
-    protected final long startSequence;
-    /**
-     * 在写完毕之后,必须要设置itemSize
-     * 比如一个自己管理内存的Segment,当到超出已经申请的内存大小时
-     * write返回false(link),而且要设置itemSize
-     */
-    protected volatile int itemSize = 0;
+    final long startSequence;
 
     SegmentNode(long startSequence) {
         this.startSequence = startSequence;
     }
 
-    protected volatile SegmentNode<E> next;
+
+    /*-----------------------下面三个属性也是接口的一部分-----------------------*/
+
+    /**
+     * 在写完毕之后,必须要设置itemSize
+     * 比如一个自己管理内存的Segment,当到超出已经申请的内存大小时
+     * write返回false(link),而且要设置itemSize
+     */
+    volatile int itemSize = 0;
+
+
+    volatile SegmentNode<E> next = null;
 
     /**
      * 所有元素是否已经读完
      */
-    protected volatile boolean read = false;
+    volatile boolean read = false;
 
 
-    /**
-     * 已读计数+1,如果读的数量==size,则返回true
-     */
-    volatile int readCount = 0;
-
-    public boolean incrementReadCount() {
-        if (unsafe.getAndAddInt(this, readCountOffset, 1) == itemSize - 1) {
-            read = true;
-        }
-
-        return read;
-    }
 
     /**
      * 下一个要写入的索引
      */
-    volatile int writeIndex = 0;
+    private volatile int writeIndex = 0;
 
     public int getAndIncrementWriteIndex(){
         return unsafe.getAndAddInt(this, writeIndexOffset, 1);
     }
+
+    public long getWriteSequence(){
+        return startSequence + writeIndex;
+    }
+
+    /**
+     * 要和read属性配合起来使用
+     */
+    abstract boolean incrementReadCount() ;
 
     /**
      * 向segment写入一个元素,当返回为false时,表示此segment已经写满,但确保已经创建了next

@@ -33,16 +33,16 @@ public class QueuedCache<E> extends AbstractQueue<E> {
     }
 
     /**
-     * 1.head节点保持node在内存用的,一旦head后移,前面的节点在消费完毕之后就会就释放
-     * 2.read方法从head开始遍历链表
-     * <p>
-     * head.startSequence<=readSequence
+     * 1.head节点保持node在内存用的,一旦head move on,前面的节点就会就释放
+     * 2.read方法从head开始遍历链表,说以要满足head.startSequence<=readSequence
+     * 3.一旦有segment消费完毕,head都会立即move on
      */
     volatile SegmentNode<E> headSegment;
 
     /**
-     * 末尾的segment,也是正在写入的segment
-     * handler最远可以读到tailSegment的前一个segment
+     * 1.末尾的segment,也是正在写入的segment
+     * 2.handler最远可以读到tailSegment的前一个segment
+     * 3.tail一旦写满,要立即move on
      */
     volatile SegmentNode<E> tailSegment;
 
@@ -64,9 +64,8 @@ public class QueuedCache<E> extends AbstractQueue<E> {
     }
 
     /**
-     * 保持对象创建时tail的snapshot和readSequence的一个副本
-     * readSequenceCopy永远自增
-     * 当readSequenceCopy==tail snapshot的startSeq时,此handler溢出作废,需要再创建一个新的handler
+     * 1.保持对象创建时tail的snapshot
+     * 2.readSequenceBeforeSnapshot==tail snapshot的startSeq时,此handler溢出作废,需要再创建一个新的handler
      */
     private final class ReadHandler {
 
@@ -80,32 +79,38 @@ public class QueuedCache<E> extends AbstractQueue<E> {
          * 下一个要读取的位置
          * 一旦超过writeSequenceSnapshot,这个handler就失效了,就要换一个handler了
          */
-        private final AtomicLong readSequence;
+        private final AtomicLong readSequenceBeforeSnapshot;
 
         ReadHandler(long readSequence) {
             tailSegmentSnapshot = getTailSegmentSnapshot();
             writeSequenceSnapshot = tailSegmentSnapshot.startSequence;
-            this.readSequence = new AtomicLong(readSequence);
+            this.readSequenceBeforeSnapshot = new AtomicLong(readSequence);
         }
 
+        /**
+         * 计算readSequence,只给{@link QueuedCache#peek}和{@link QueuedCache#size}使用
+         */
         long getReadSequence() {
-            long readSeg = readSequence.get();
-            return readSeg < writeSequenceSnapshot ? readSeg : writeSequenceSnapshot + readTailSegmentCount;
+            long seq = readSequenceBeforeSnapshot.get();
+            return seq < writeSequenceSnapshot ? seq : writeSequenceSnapshot + readTailSegmentCount;
         }
 
+        /**
+         * 减少写入readSequenceBeforeSnapshot,提高性能
+         */
         private volatile boolean overflow = false;
 
         E readConcurrently() {
             if (overflow) return null;
 
-            long readSeq;
-            if ((readSeq = readSequence.getAndIncrement()) < writeSequenceSnapshot) {//不可能读到tailSegmentSnapshot
+            long seq;
+            if ((seq = readSequenceBeforeSnapshot.getAndIncrement()) < writeSequenceSnapshot) {//不可能读到tailSegmentSnapshot
                 /**
                  * 找到readSeg,headSegment是谁无所谓
                  */
-                SegmentNode<E> readSeg = findSegmentNode(readSeq);
+                SegmentNode<E> readSeg = findSegmentNode(seq);
 
-                E e = (E) readSeg.read((int) (readSeq - readSeg.startSequence));
+                E e = (E) readSeg.read((int) (seq - readSeg.startSequence));
 
                 if (readSeg.read) {
                     moveOnHeadSegment();
@@ -150,28 +155,30 @@ public class QueuedCache<E> extends AbstractQueue<E> {
         }
     }
 
-
+    /**
+     * 返回tailSegment,否则就找出满足maxItemSizePerHandler要求的segment
+     */
     private final SegmentNode<E> getTailSegmentSnapshot() {
         if (maxItemSizePerHandler == -1) return tailSegment;
         int count = 0;
         SegmentNode<E> h = headSegment, p = h;
 
         int itemSize;
-        while ((itemSize = p.itemSize) != 0 && (count += itemSize) < maxItemSizePerHandler) {
+        while ((itemSize = p.itemSize) != 0 && (count += p.read ? 0 : itemSize) < maxItemSizePerHandler) {
             /**
              * itemSize>0,next肯定不是null{@link ArraySegmentNode#writeOrLink}
              */
             p = p.next;
         }
         /**
-         * 1.itemSize==0 writing,
-         * 2.第一次count>maxItemSizeInHeap
+         * 1.itemSize==0 writing segment,
+         * 2.count>maxItemSizeInHeap
          */
 
         /**
          * 1.防止maxItemSizePerHandler设置的过小,导致tailSegmentSnapshot==headSegment
          * 这样会导致不停的创建新的handler,而不去读
-         * 2.如果p.next==null,p还有可能返回headSegment,此时p=head=tail,造成再次在lock中读
+         * 2.如果p.next==null,p还有可能返回headSegment,此时p=head=tail,造成再次在lock中读tail
          */
         if (p == h && p.next != null) {
             p = p.next;
@@ -182,7 +189,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
 
     /**
      * readSeq肯定在headSegment.startSequence的后面
-     * 1.在readHandler的read方法中,readSeq肯定在tail之前的位置中
+     * 1.在readHandler的read方法中,readSeq肯定在tail(writing)之前的位置中
      * 2.在peek方法中,就不一定了
      */
     private final SegmentNode<E> findSegmentNode(long readSeq) {
@@ -228,10 +235,10 @@ public class QueuedCache<E> extends AbstractQueue<E> {
                     SegmentNode<E> tailSnapshot;
                     if ((tailSnapshot = handler.tailSegmentSnapshot) == tailSegment) {
                         /**
-                         * tail没有move on,就在在lock中直接读取tail
-                         * 此时虽然handler已经overflow,并不意味着所有的读线程都读完了
-                         * 也就是,除了当前线程已经返回外,可能还有其他线程正在handler.read中
+                         * 除tail(writing)外都已经读完
+                         * 此时虽然handler已经overflow,并不意味着所有的读线程都读完了,除了当前线程已经返回外,可能还有其他线程正在handler.read中
                          * 下面进行一个延时等待,等待所有线程都读完,也就是等待将tailSnapshot之前全部读完,让head move on到tailSnapshot
+                         * 也就是说moveOnHeadSegment方法中不能做hops优化
                          * 这个等待会让写慢读快情境下,队列的效率降低.不过这个类应对的场景就是写快读慢
                          */
                         while (headSegment != tailSnapshot) {
@@ -242,7 +249,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
                         return handler.readTailSegmentSnapshot();
                     } else {
                         /**
-                         * tailSegment相对于tailSegmentSnapshot已经move on,readHandler已经溢出,所以要更新readHandler
+                         * 还有可读的segment,此时readHandler已经溢出,所以要更新readHandler
                          */
                         if (handler == readHandler) {
                             /**
@@ -262,26 +269,14 @@ public class QueuedCache<E> extends AbstractQueue<E> {
 
     protected final void write(E e) {
         /**
-         * 写tailSegment,直到写满后再move on tail
-         * 这里默认tailSegment就是writing segment,不再优化为多读少写
+         * 写tailSegment,写满后立即move on tail
+         * 这里默认tailSegment就是writing segment,
          */
         SegmentNode t;
         while (!(t = tailSegment).writeOrLink(e)) {
             unsafe.compareAndSwapObject(this, tailSegmentOffset, t, t.next);
         }
     }
-
-    @Override
-    public E poll() {
-        return read();
-    }
-
-    @Override
-    public boolean offer(E e) {
-        write(e);
-        return true;
-    }
-
 
     /**
      * headSegment向tail移动,释放内存
@@ -307,6 +302,17 @@ public class QueuedCache<E> extends AbstractQueue<E> {
         }
     }
 
+    @Override
+    public E poll() {
+        return read();
+    }
+
+    @Override
+    public boolean offer(E e) {
+        write(e);
+        return true;
+    }
+
 
     /**
      * 这个类的最终目的是实现缓冲的持久化,迭代式无意义的
@@ -321,8 +327,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
      */
     @Override
     public int size() {
-        SegmentNode<E> t = tailSegment;
-        return (int) (t.startSequence + t.writeIndex - readHandler.getReadSequence());
+        return (int) (tailSegment.getWriteSequence() - readHandler.getReadSequence());
     }
 
 
