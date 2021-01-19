@@ -33,7 +33,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
     }
 
     /**
-     * 表示下一次要读的位置
+     * 表示下一次要读的位置,此值可能会落后实际读的位置,会使得依赖于这个值的方法返回的都未必是精确值
      * readSequence最大可以读到的值为tailSegmentSnapshot的prev的segment的值
      */
     final AtomicLong readSequence = new AtomicLong(0);
@@ -125,7 +125,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
         long readSeq;
         E e;
         /**
-         * 用自旋来更精确的实现peek
+         * 用自旋来更精确的实现peek,但仅仅是更精确
          */
         do {
             readSeq = readSequence.get();
@@ -332,6 +332,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
 
     /**
      * 因为是无界队列,所以可能出现无法返回的数字
+     * 即使在正整数的范围内,返回的也未必精确
      * 所以这个方法意义不大
      */
     @Override
