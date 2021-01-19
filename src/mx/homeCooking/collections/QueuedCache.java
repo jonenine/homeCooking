@@ -33,10 +33,35 @@ public class QueuedCache<E> extends AbstractQueue<E> {
     }
 
     /**
-     * 表示下一次要读的位置,此值可能会落后实际读的位置,会使得依赖于这个值的方法返回的都未必是精确值
-     * readSequence最大可以读到的值为tailSegmentSnapshot的prev的segment的值
+     * 1.head节点保持node在内存用的,一旦head后移,前面的节点在消费完毕之后就会就释放
+     * 2.read方法从head开始遍历链表
+     * <p>
+     * head.startSequence<=readSequence
      */
-    final AtomicLong readSequence = new AtomicLong(0);
+    volatile SegmentNode<E> headSegment;
+
+    /**
+     * 末尾的segment,也是正在写入的segment
+     * handler最远可以读到tailSegment的前一个segment
+     */
+    volatile SegmentNode<E> tailSegment;
+
+    /**
+     * 一个handler最多允许读的item的数量
+     * 实际会取遍历过程中第一个大于此值的seg
+     */
+    final int maxItemSizePerHandler;
+
+
+    public QueuedCache(int maxItemSizePerHandler) {
+        this.maxItemSizePerHandler = maxItemSizePerHandler;
+        headSegment = tailSegment = new ArraySegmentNode(0);
+        readHandler = new ReadHandler(0);
+    }
+
+    public QueuedCache() {
+        this(-1);
+    }
 
     /**
      * 保持对象创建时tail的snapshot和readSequence的一个副本
@@ -61,11 +86,15 @@ public class QueuedCache<E> extends AbstractQueue<E> {
             readSequenceCopy = new AtomicLong(readSequence);
         }
 
+        long readSequence() {
+            long readSeg = readSequenceCopy.get();
+            return readSeg < writeSequenceSnapshot ? readSeg : writeSequenceSnapshot + readTailSegmentCount;
+        }
+
         volatile boolean overflow = false;
 
-        E read() {
+        E readConcurrently() {
             if (overflow) return null;
-
             /**
              * 返回当前要读的位置,并将readSequence指向下一个位置
              */
@@ -79,7 +108,6 @@ public class QueuedCache<E> extends AbstractQueue<E> {
 
                 E e = (E) readSeg.read((int) (readSeq - readSeg.startSequence));
 
-                readSequence.getAndIncrement();
                 if (readSeg.read) {
                     moveOnHeadSegment();
                 }
@@ -93,125 +121,38 @@ public class QueuedCache<E> extends AbstractQueue<E> {
                 return null;
             }
         }
-    }
 
-    /**
-     * readSeq肯定在headSegment.startSequence的后面
-     * 1.在readHandler的read方法中,readSeq肯定在tail之前的位置中
-     * 2.在peek方法中,就不一定了
-     */
-    private final SegmentNode<E> findSegmentNode(long readSeq) {
-        SegmentNode<E> p = headSegment;
-        int itemSize;
-        while ((itemSize = p.itemSize) > 0 && readSeq >= p.startSequence + itemSize) {
-            /**
-             * itemSize>0,next肯定不是null{@link ArraySegmentNode#writeOrLink}
-             */
-            p = p.next;
-        }
         /**
-         * 1.读到writing segment
-         * 2.遍历到一个已经写完的segment中
+         * 在handler overflow后,在lock中读取tailSegmentSnapshot的计数
          */
+        volatile int readTailSegmentCount = 0;
 
-        return p;
-    }
-
-    /**
-     * peek的精确含义是不从队列中拿走值的poll
-     */
-    @Override
-    public E peek() {
-        long readSeq;
-        E e;
         /**
-         * 用自旋来更精确的实现peek,但仅仅是更精确
+         * 下面的方法在lock中调用
+         * {@link QueuedCache#read}
          */
-        do {
-            readSeq = readSequence.get();
-            SegmentNode<E> seg = findSegmentNode(readSeq);
-            e = (E) seg.itemAt((int) (readSeq - seg.startSequence));
-        } while (readSeq != readSequence.get());
+        E readTailSegmentSnapshot() {
+            E e = tailSegmentSnapshot.itemAt(readTailSegmentCount);
 
-        return e;
-    }
-
-    /**
-     * tail实际上是writing segment,进入tail时候是要加锁的
-     */
-    private final ReentrantLock closeTailLock = new ReentrantLock();
-
-    volatile ReadHandler readHandler;
-
-    protected final E read() {
-        for (; ; ) {
-            E e;
-            ReadHandler handler = readHandler;
-            if ((e = handler.read()) != null) return e;
-            else {
-                /**
-                 * handler.read返回null,handler已经overflow
-                 * 下面这一段必须同步
-                 */
-                final ReentrantLock lock = closeTailLock;
-                lock.lock();
-                try {
-                    if (handler != readHandler) continue;
-
-                    SegmentNode<E> tailSnapshot;
-                    if ((tailSnapshot = handler.tailSegmentSnapshot) == tailSegment) {
-                        /**
-                         * tail没有move on,就在在lock中直接读取tail
-                         * 此时虽然handler已经overflow,并不意味着所有的读线程都读完了
-                         * 也就是,除了当前线程已经返回外,可能还有其他线程正在handler.read中
-                         * 下面进行一个延时等待,等待所有线程都读完,也就是等待readSequence变成writeSequenceSnapshot
-                         * 这个等待会让写慢读快情境下,队列的效率降低.不过这个类应对的场景就是写快读慢
-                         */
-                        while (readSequence.get() < handler.writeSequenceSnapshot) {
-                            //just wait a moment
-                            Thread.yield();
-                        }
-
-                        e = tailSnapshot.itemAt((int) (readSequence.get() - tailSnapshot.startSequence));
-
-                        //可能会读到tail后面的segment去
-                        if (e != null) {
-                            readSequence.incrementAndGet();
-                            if (tailSnapshot.incrementReadCount()) {
-                                /**
-                                 * 这很有可能会让head跑到tail(tail只是上次观测时的最后一个)的前面去,
-                                 * 等待tail move on,再进入下面的else中创建新的handler
-                                 * tail都读完了,说明tail早就都写完了,也就是已经link next.会让head move on到tail的next上去
-                                 */
-                                moveOnHeadSegment();
-                            }
-                        }
-
-                        return e;
-                    } else {
-                        /**
-                         * tailSegment相对于tailSegmentSnapshot已经move on,readHandler已经溢出,所以要更新readHandler
-                         */
-                        /**
-                         * 可能正在读tail的过程中,发生了tailSegment move on,此时readSequence可能已经读了几个值了
-                         */
-                        long readSeq = Math.max(readSequence.get(), handler.writeSequenceSnapshot);
-                        if (handler == readHandler) {
-                            /**
-                             * 虽然tail已经区别于tail snapshot,,但可能tail snapshot已经被读完
-                             * 造成head move on,而且head=tail,下次再读的时候还是在lock中读
-                             */
-                            unsafe.compareAndSwapObject(this, readHandlerOffset, handler, new ReadHandler(readSeq));
-                        }
-                    }
-                } finally {
-                    lock.unlock();
+            //可能会读到tail后面的segment去
+            if (e != null) {
+                readTailSegmentCount++;
+                if (tailSegmentSnapshot.incrementReadCount()) {
+                    /**
+                     * 这很有可能会让head跑到tail(tail只是上次观测时的最后一个)的前面去,
+                     * 等待tail move on,再进入下面的else中创建新的handler
+                     * tail都读完了,说明tail早就都写完了,也就是已经link next.会让head move on到tail的next上去
+                     */
+                    moveOnHeadSegment();
                 }
             }
+
+            return e;
         }
     }
 
-    private SegmentNode<E> getTailSegmentSnapshot() {
+
+    private final SegmentNode<E> getTailSegmentSnapshot() {
         if (maxItemSizePerHandler == -1) return tailSegment;
         int count = 0;
         SegmentNode<E> h = headSegment, p = h;
@@ -240,6 +181,88 @@ public class QueuedCache<E> extends AbstractQueue<E> {
         return p;
     }
 
+    /**
+     * readSeq肯定在headSegment.startSequence的后面
+     * 1.在readHandler的read方法中,readSeq肯定在tail之前的位置中
+     * 2.在peek方法中,就不一定了
+     */
+    private final SegmentNode<E> findSegmentNode(long readSeq) {
+        SegmentNode<E> p = headSegment;
+        int itemSize;
+        while ((itemSize = p.itemSize) > 0 && readSeq >= p.startSequence + itemSize) {
+            /**
+             * itemSize>0,next肯定不是null{@link ArraySegmentNode#writeOrLink}
+             */
+            p = p.next;
+        }
+        /**
+         * 1.读到writing segment
+         * 2.遍历到一个已经写完的segment中
+         */
+
+        return p;
+    }
+
+
+    volatile ReadHandler readHandler;
+
+    /**
+     * tail实际上是writing segment,进入tail时候是要加锁的
+     */
+    private final ReentrantLock readInTailSnapshotLock = new ReentrantLock();
+
+    protected final E read() {
+        for (; ; ) {
+            E e;
+            ReadHandler handler = readHandler;
+            if ((e = handler.readConcurrently()) != null) return e;
+            else {
+                /**
+                 * handler.read返回null,handler已经overflow
+                 * 下面这一段必须同步
+                 */
+                final ReentrantLock lock = readInTailSnapshotLock;
+                lock.lock();
+                try {
+                    if (handler != readHandler) continue;
+
+                    SegmentNode<E> tailSnapshot;
+                    if ((tailSnapshot = handler.tailSegmentSnapshot) == tailSegment) {
+                        /**
+                         * tail没有move on,就在在lock中直接读取tail
+                         * 此时虽然handler已经overflow,并不意味着所有的读线程都读完了
+                         * 也就是,除了当前线程已经返回外,可能还有其他线程正在handler.read中
+                         * 下面进行一个延时等待,等待所有线程都读完,也就是等待将tailSnapshot之前全部读完,让head move on到tailSnapshot
+                         * 这个等待会让写慢读快情境下,队列的效率降低.不过这个类应对的场景就是写快读慢
+                         */
+                        while (headSegment != tailSnapshot) {
+                            //just wait a moment
+                            Thread.yield();
+                        }
+
+                        return handler.readTailSegmentSnapshot();
+                    } else {
+                        /**
+                         * tailSegment相对于tailSegmentSnapshot已经move on,readHandler已经溢出,所以要更新readHandler
+                         */
+                        /**
+                         * 可能正在读tail的过程中,发生了tailSegment move on,此时readSequence可能已经读了几个值了
+                         */
+                        long readSeq = handler.writeSequenceSnapshot + handler.readTailSegmentCount;
+                        if (handler == readHandler) {
+                            /**
+                             * 虽然tail已经区别于tail snapshot,,但可能tail snapshot已经被读完
+                             * 造成head move on,而且head=tail,下次再读的时候还是在lock中读
+                             */
+                            unsafe.compareAndSwapObject(this, readHandlerOffset, handler, new ReadHandler(readSeq));
+                        }
+                    }
+                } finally {
+                    lock.unlock();
+                }
+            }
+        }
+    }
 
     protected final void write(E e) {
         /**
@@ -262,21 +285,6 @@ public class QueuedCache<E> extends AbstractQueue<E> {
         write(e);
         return true;
     }
-
-    /**
-     * 末尾的segment,通常是正在写入的segment
-     */
-    volatile SegmentNode<E> tailSegment;
-
-
-    /**
-     * 1.head节点保持node在内存用的,一旦head后移,前面的节点在消费完毕之后就会就释放
-     * 除此之外headSegment没有其他意义
-     * 2.read方法从head开始遍历链表
-     * <p>
-     * head.startSequence<=readSequence
-     */
-    volatile SegmentNode<E> headSegment;
 
 
     /**
@@ -303,27 +311,9 @@ public class QueuedCache<E> extends AbstractQueue<E> {
         }
     }
 
-    /**
-     * 一个handler最多允许读的item的数量
-     * 实际会取遍历过程中第一个大于此值的seg
-     */
-    final int maxItemSizePerHandler;
-
-
-    public QueuedCache(int maxItemSizePerHandler) {
-        this.maxItemSizePerHandler = maxItemSizePerHandler;
-        headSegment = tailSegment = new ArraySegmentNode(0);
-        readHandler = new ReadHandler(0);
-    }
-
-    public QueuedCache() {
-        this(-1);
-    }
 
     /**
-     * 无法迭代
-     *
-     * @return
+     * 这个类的最终目的是实现缓冲的持久化,迭代式无意义的
      */
     @Override
     public Iterator<E> iterator() {
@@ -332,12 +322,27 @@ public class QueuedCache<E> extends AbstractQueue<E> {
 
     /**
      * 因为是无界队列,所以可能出现无法返回的数字
-     * 即使在正整数的范围内,返回的也未必精确
-     * 所以这个方法意义不大
      */
     @Override
     public int size() {
-        return (int) (tailSegment.startSequence + tailSegment.writeIndex - readSequence.get());
+        SegmentNode<E> t = tailSegment;
+        return (int) (t.startSequence + t.writeIndex - readHandler.readSequence());
+    }
+
+
+    /**
+     * peek的精确含义是不从队列中拿走值的poll
+     */
+    @Override
+    public E peek() {
+        E e;
+        long seq = readHandler.readSequence();
+        do {
+            SegmentNode<E> seg = findSegmentNode(seq);
+            e = (E) seg.itemAt((int) (seq - seg.startSequence));
+        } while (seq != (seq = readHandler.readSequence()));
+
+        return e;
     }
 
 }
