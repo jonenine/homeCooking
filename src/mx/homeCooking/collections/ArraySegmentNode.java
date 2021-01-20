@@ -40,6 +40,10 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
 
     @Override
     public boolean writeOrLink(E e) {
+        /**
+         * 注意下面是index先+1,在写入数组,这回导致writeIndex不准确
+         * 不过目前只有cache的size方法使用了writeIndex
+         */
         int index = getAndIncrementWriteIndex();
         if (index < itemSize) {
             array[index] = e;

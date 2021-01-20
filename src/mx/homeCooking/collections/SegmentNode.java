@@ -46,10 +46,11 @@ abstract class SegmentNode<E> {
 
     /**
      * 下一个要写入的索引
+     * writeIndex-1未必写入,但终会写入
      */
     private volatile int writeIndex = 0;
 
-    public int getAndIncrementWriteIndex(){
+    int getAndIncrementWriteIndex(){
         return unsafe.getAndAddInt(this, writeIndexOffset, 1);
     }
 
