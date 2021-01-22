@@ -55,7 +55,8 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
 
     @Override
     public int getWriteIndex() {
-        return writeIndex >= ARRAY_SIZE ? (ARRAY_SIZE - 1) : writeIndex;
+        int wi = writeIndex;
+        return wi >= ARRAY_SIZE ? (ARRAY_SIZE - 1) : wi;
     }
 
     @Override

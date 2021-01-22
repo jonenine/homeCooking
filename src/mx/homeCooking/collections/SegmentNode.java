@@ -24,9 +24,6 @@ abstract class SegmentNode<E> {
         this.startSequence = startSequence;
     }
 
-
-    /*-----------------------下面三个属性也是接口的一部分-----------------------*/
-
     /**
      * 只有size方法使用
      */
@@ -34,6 +31,8 @@ abstract class SegmentNode<E> {
         return startSequence + getWriteIndex();
     }
 
+
+    /*-----------------------下面三个属性也是接口的一部分-----------------------*/
     /**
      * 在写完毕之后,必须要设置itemSize
      * 比如一个自己管理内存的Segment,当到超出已经申请的内存大小时
