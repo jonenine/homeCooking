@@ -3,25 +3,39 @@ package mx.homeCooking.collections;
 import mx.homeCooking.UnsafeUtil;
 import sun.misc.Unsafe;
 
+
 /**
  * 创建一个固定元素大小的,基于jvm对象数组的Segment
  */
 class ArraySegmentNode<E> extends SegmentNode<E> {
 
     static final Unsafe unsafe = UnsafeUtil.unsafe;
-    static final long nextOffset;
     static final long readCountOffset;
+    static final long writeIndexOffset;
+
+    static final long base;
+    static final int shift;
 
     static {
-
         try {
             readCountOffset = unsafe.objectFieldOffset
                     (ArraySegmentNode.class.getDeclaredField("readCount"));
-            nextOffset = unsafe.objectFieldOffset
-                    (ArraySegmentNode.class.getDeclaredField("next"));
+            writeIndexOffset = unsafe.objectFieldOffset
+                    (ArraySegmentNode.class.getDeclaredField("writeIndex"));
+            /**
+             * {@link java.util.concurrent.atomic.AtomicReferenceArray}
+             */
+            Class<?> aClass = Object[].class;
+            base = unsafe.arrayBaseOffset(aClass);
+            int scale = unsafe.arrayIndexScale(aClass);
+            shift = 31 - Integer.numberOfLeadingZeros(scale);
         } catch (NoSuchFieldException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static long byteOffset(int i) {
+        return ((long) i << shift) + base;
     }
 
     final static int ARRAY_SIZE = 200;
@@ -33,20 +47,29 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
         this.array = new Object[ARRAY_SIZE];
     }
 
+    /**
+     * 下一个要写入的索引
+     * writeIndex-1未必已经写入,但终会写入
+     */
+    private volatile int writeIndex = 0;
 
-    private final boolean linkNext(ArraySegmentNode next) {
-        return unsafe.compareAndSwapObject(this, nextOffset, null, next);
+    @Override
+    public int getWriteIndex() {
+        return writeIndex >= ARRAY_SIZE ? (ARRAY_SIZE - 1) : writeIndex;
     }
 
     @Override
     public boolean writeOrLink(E e) {
         /**
-         * 注意下面是index先+1,在写入数组,这回导致writeIndex不准确
+         * 注意下面是index先+1,再写入数组,这会导致writeIndex不准确
          * 不过目前只有cache的size方法使用了writeIndex
          */
-        int index = getAndIncrementWriteIndex();
-        if (index < itemSize) {
-            array[index] = e;
+        int index = unsafe.getAndAddInt(this, writeIndexOffset, 1);
+        if (index < ARRAY_SIZE) {
+            /**
+             * 写volatile
+             */
+            unsafe.putObjectVolatile(array, byteOffset(index), e);
             return true;
         } else {
             if (next == null) {
@@ -63,9 +86,12 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
     }
 
     @Override
-    public E itemAt(int index){
-        if (index >= 0 && index < itemSize) {
-            return (E) array[index];
+    public E itemAt(int index) {
+        if (index >= 0 && index < ARRAY_SIZE) {
+            /**
+             * 读volatile
+             */
+            return (E) unsafe.getObjectVolatile(array, byteOffset(index));
         }
 
         return null;
@@ -77,13 +103,34 @@ class ArraySegmentNode<E> extends SegmentNode<E> {
     volatile int readCount = 0;
 
     public boolean incrementReadCount() {
-        if (unsafe.getAndAddInt(this, readCountOffset, 1) == itemSize - 1) {
+        /**
+         * 在itemSize被设置之前,就可能会读到这里,所以下面对的判断只能用ARRAY_SIZE而不能用itemSize
+         */
+        if (unsafe.getAndAddInt(this, readCountOffset, 1) == ARRAY_SIZE - 1) {
             read = true;
         }
 
         return read;
     }
 
+    public static void main(String[] args) {
+        Class<?> ak = Object[].class;
+        long baseOffset = unsafe.arrayBaseOffset(ak);
+        int scale = unsafe.arrayIndexScale(ak);
+        int shift = 31 - Integer.numberOfLeadingZeros(scale);
+        System.err.println(baseOffset + "/" + scale + "/" + shift);
+
+        Object[] target = new Object[100];
+        for (int i = 0; i < 100; i++) {
+            long eleOffset = ((long) i << shift) + baseOffset;
+            unsafe.putObjectVolatile(target, eleOffset, i + "哈哈");
+        }
+
+        for (int i = 0; i < 100; i++) {
+            System.err.println(target[i]);
+        }
+
+    }
 
 
 }
