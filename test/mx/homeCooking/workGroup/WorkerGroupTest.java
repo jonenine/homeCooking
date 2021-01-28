@@ -1,11 +1,10 @@
-package mx.homeCooking;
+package mx.homeCooking.workGroup;
 
 import org.junit.Test;
 
 import java.util.Queue;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Stream;
 
 public class WorkerGroupTest {
 
@@ -89,6 +88,8 @@ public class WorkerGroupTest {
             //WorkerGroup tg = WorkerGroups.timeoutExecutor("test", 8);
             AbstractExecutorService tg = WorkerGroups.scheduledExecutor("test", 8);
             //ExecutorService tg = Executors.newFixedThreadPool(8);
+            //ExecutorService tg = Executors.newScheduledThreadPool(8);
+            //ExecutorService tg = new ForkJoinPool(16);
 
             long start = System.currentTimeMillis();
             for (int i = 0; i < 20; i++) {
@@ -105,46 +106,48 @@ public class WorkerGroupTest {
 
     public static void main(String[] args) {
         WorkerGroupTest test = new WorkerGroupTest();
-        test.watchLifeCycle();
+        test.testPerformance();
     }
 
 
     @Test
     public void watchLifeCycle() {
-        WorkerGroup tg = (WorkerGroup) WorkerGroups.timeoutExecutor("test", 8);
-
-        Thread stopThread = new Thread(()->{
-            System.err.println("线程池队列大小:"+tg.getQueueSize());
-            sleep(6000);
-            System.err.println("现在关闭进程!,队列大小:"+tg.getQueueSize());
-            System.exit(1);
-        });
-
-
+        WorkerGroup tg = (WorkerGroup) WorkerGroups.executor("test", 8);
         sleep(2000);
-        System.err.println("开始消费:");
-        int sum = 10000;
-        long start = time();
-        AtomicInteger counter = new AtomicInteger(0);
-        for (int i = 0; i < sum; i++) {
-            /**
-             * 单线程入队延时任务,看看任务能不能重平均
-             */
-            tg.execute(() -> {
-                //windows睡眠不准确,当一次谁17毫秒时,差不多是对的
-                sleep(17);
-                int count;
-                if ((count = counter.incrementAndGet()) == sum) {
-                    System.err.println("消费结束:" + time(start));
-                    stopThread.start();
-                }else if(count>sum){
-                    System.err.println("消费异常 count:" + count);
-                }
-            });
-        }
-        System.err.println("入队结束:" + time(start));
 
-        sleep(9999999);
+        while(true){
+            System.err.println("开始消费:");
+            CountDownLatch cdl = new CountDownLatch(1);
+            int sum = 10000;
+            long start = time();
+            AtomicInteger counter = new AtomicInteger(0);
+            for (int i = 0; i < sum; i++) {
+                /**
+                 * 单线程入队延时任务,看看任务能不能重平均
+                 */
+                tg.execute(() -> {
+                    sleep(1);
+                    int count;
+                    if ((count = counter.incrementAndGet()) == sum) {
+                        System.err.println("消费结束:" + time(start));
+                        cdl.countDown();
+                    }else if(count>sum){
+                        System.err.println("消费异常 count:" + count);
+                    }
+                });
+            }
+            System.err.println("入队结束:" + time(start)+",线程池队列大小:"+tg.getQueueSize());
+            try {
+                cdl.await();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            System.err.println("线程池队列大小:"+tg.getQueueSize());
+            sleep(10000);
+            System.err.println("线程池队列大小:"+tg.getQueueSize());
+        }
+
+
     }
 
 }

@@ -1,4 +1,4 @@
-package mx.homeCooking;
+package mx.homeCooking.workGroup;
 
 import org.junit.Test;
 
