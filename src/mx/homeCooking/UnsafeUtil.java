@@ -1,4 +1,4 @@
-package mx.homeCooking.workGroup;
+package mx.homeCooking;
 
 import sun.misc.Unsafe;
 
@@ -42,7 +42,7 @@ public class UnsafeUtil {
 
     static final long[] offsets = new long[8];
 
-    static final Unsafe unsafe;
+    public static final Unsafe unsafe;
     static final long firstOffset;
     static final long modInterval;
 
