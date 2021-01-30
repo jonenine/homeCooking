@@ -4,7 +4,10 @@ import org.junit.Test;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
 import static org.junit.Assert.assertEquals;
@@ -55,6 +58,7 @@ public class WorkerTest {
 
 
     final ThreadLocal<Boolean> shutdownLocal = new ThreadLocal<>();
+
     /**
      * 测试shutDown,以及shutdown后处理遗留任务
      */
@@ -86,11 +90,11 @@ public class WorkerTest {
 
         try {
             Boolean isShutdownNow = shutdownLocal.get();
-            if(isShutdownNow==null || !isShutdownNow){
+            if (isShutdownNow == null || !isShutdownNow) {
                 threadWorker.shutdown();
-            }else {
+            } else {
                 List<Runnable> terminatedTasks = threadWorker.shutdownNow();
-                System.out.println("shutdownNow后剩余任务数"+terminatedTasks.size());
+                System.out.println("shutdownNow后剩余任务数" + terminatedTasks.size());
             }
 
             /**
@@ -116,7 +120,7 @@ public class WorkerTest {
     }
 
     @Test
-    public void testShutDownNowManyTimes() throws Exception{
+    public void testShutDownNowManyTimes() throws Exception {
         shutdownLocal.set(true);
         for (int i = 0; i < 1000; i++) {
             testShutDown();
@@ -131,7 +135,7 @@ public class WorkerTest {
 
     }
 
-    static void sleep(long l){
+    static void sleep(long l) {
         try {
             Thread.sleep(l);
         } catch (InterruptedException e) {
@@ -145,22 +149,22 @@ public class WorkerTest {
 
         long start = System.currentTimeMillis();
         Thread.State state;
-        do{
+        do {
             sleep(1);
-            state= threadWorker.getThread().getState();
+            state = threadWorker.getThread().getState();
             //System.out.println("开始:"+state);
-        }while (state != Thread.State.TIMED_WAITING);
-        System.out.println("线程创建后需要"+(System.currentTimeMillis()-start)+"才可以进入TIMED_WAITING");
+        } while (state != Thread.State.TIMED_WAITING);
+        System.out.println("线程创建后需要" + (System.currentTimeMillis() - start) + "才可以进入TIMED_WAITING");
 
 
-        threadWorker.execute(()->{
+        threadWorker.execute(() -> {
             System.out.print("正在执行任务:");
             System.out.println(threadWorker.getThread().getState());
         });
         sleep(10);
 
 
-        System.out.println("执行任务之后:"+threadWorker.getThread().getState());
+        System.out.println("执行任务之后:" + threadWorker.getThread().getState());
     }
 
 
@@ -197,7 +201,7 @@ public class WorkerTest {
                             e.printStackTrace();
                         }
                         //3.发最后一个任务,看能否唤醒
-                        new Thread(()->{
+                        new Thread(() -> {
                             threadWorker.execute(() -> {
                                 //此时threadWorker肯定是1,因为这个runnable还没有执行完成呢!
                                 System.out.println("最后一个任务消费完毕!");
@@ -222,7 +226,6 @@ public class WorkerTest {
         } catch (InterruptedException e) {
         }
     }
-
 
 
     /**
@@ -319,8 +322,8 @@ public class WorkerTest {
                 try {
                     Thread.sleep(1000);
                     StringBuilder sb = new StringBuilder();
-                    for(AtomicInteger counter:counters){
-                        sb.append(counter.get()+",");
+                    for (AtomicInteger counter : counters) {
+                        sb.append(counter.get() + ",");
                     }
                     //System.err.println(new Date()+"/"+threadWorker.getDateSize()+"---- "+sb);
                 } catch (InterruptedException e) {
@@ -330,14 +333,14 @@ public class WorkerTest {
         }).start();
 
         while (true) {
-            synchronized (allCdl){
+            synchronized (allCdl) {
                 allCdl[0] = new CountDownLatch(productThreadSum);
             }
             for (int j = 0; j < productThreadSum; j++) {
                 final AtomicInteger counter = counters[j] = new AtomicInteger(0);
                 final AtomicInteger misCounter = new AtomicInteger(0);
                 final BitSet bitset = new BitSet(taskSum);
-                final CountDownLatch cdl  = new CountDownLatch(1);
+                final CountDownLatch cdl = new CountDownLatch(1);
 
                 int jj = j;
                 /**
@@ -345,7 +348,7 @@ public class WorkerTest {
                  */
                 new Thread(() -> {
                     long start = System.currentTimeMillis();
-                    System.out.println(jj+"开始入队");
+                    System.out.println(jj + "开始入队");
                     for (int i = 0; i < taskSum; i++) {
                         final int ii = i;
                         //时间上也要随机,定时不能总是原来越大,也要相应变小
@@ -380,9 +383,9 @@ public class WorkerTest {
                                 cdl.countDown();
                             }
 
-                        }, delay,TimeUnit.MILLISECONDS);
+                        }, delay, TimeUnit.MILLISECONDS);
                     }
-                    System.out.println(jj+"入队时间:"+(System.currentTimeMillis()-start)+"/调度误差个数:"+misCounter.get());
+                    System.out.println(jj + "入队时间:" + (System.currentTimeMillis() - start) + "/调度误差个数:" + misCounter.get());
 
                     try {
                         cdl.await();
@@ -392,7 +395,7 @@ public class WorkerTest {
                     //bitset校验
                     assertEquals(bitset.nextClearBit(0), taskSum);
 
-                    synchronized (allCdl){
+                    synchronized (allCdl) {
                         allCdl[0].countDown();
                     }
                 }).start();
@@ -430,9 +433,9 @@ public class WorkerTest {
             final CountDownLatch cdl = new CountDownLatch(1);
 
             long start = System.currentTimeMillis();
-            System.out.println("开始入队"+System.currentTimeMillis());
+            System.out.println("开始入队" + System.currentTimeMillis());
 
-            Function<Integer,Runnable> runnableCreator = (ii)->()->{
+            Function<Integer, Runnable> runnableCreator = (ii) -> () -> {
                 //时间上也要随机,定时不能总是原来越大,也要相应变小
                 long delay = 200 + ii / 100 - (int) (100 * ThreadLocalRandom.current().nextFloat());
                 delay = 1;
@@ -469,7 +472,7 @@ public class WorkerTest {
                 }, delay);
             };
 
-            for (int i = 0; i < taskSum-1; i++) {
+            for (int i = 0; i < taskSum - 1; i++) {
                 executor.execute(runnableCreator.apply(i));
             }//~for
 
@@ -479,9 +482,9 @@ public class WorkerTest {
                 e.printStackTrace();
             }
 
-            executor.execute(runnableCreator.apply(taskSum-1));
+            executor.execute(runnableCreator.apply(taskSum - 1));
             //和上面的测试不同,此时入队还没有结束,入队的任务还在executor中
-            System.err.println("此时队列中还剩Date:"+threadWorker.getDateSize());
+            System.err.println("此时队列中还剩Date:" + threadWorker.getDateSize());
 
             try {
                 cdl.await();
@@ -491,7 +494,7 @@ public class WorkerTest {
 
             //bitset校验
             assertEquals(bitset.nextClearBit(0), taskSum);
-            System.err.println("剩余定时数量:" + threadWorker.getDateSize()+",超时调度数:"+misCounter.get());
+            System.err.println("剩余定时数量:" + threadWorker.getDateSize() + ",超时调度数:" + misCounter.get());
         }
     }
 
@@ -504,8 +507,6 @@ public class WorkerTest {
         }
         System.err.println(bitset.nextClearBit(0));
     }
-
-
 
 
     @Test
@@ -566,6 +567,59 @@ public class WorkerTest {
             list.add(h);
         }
         System.out.println("查找耗时:" + (System.currentTimeMillis() - start) + "---" + list.size());
+    }
+
+    @Test
+    public void testCondition() throws Exception {
+        ReentrantLock lock = new ReentrantLock();
+        Condition condition = lock.newCondition();
+        for (int i = 0; i < 1000; i++) {
+            final int j = i;
+            final AtomicInteger counter = new AtomicInteger(0);
+            Thread t = new Thread(() -> {
+                lock.lock();
+                try {
+                    counter.set(1);
+                    condition.await();
+                    counter.set(2);
+                    System.err.println(j+" leave");
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                } finally {
+                    lock.unlock();
+                }
+            });
+
+            t.start();
+
+            while (counter.get() == 0) {
+                //wait
+            }
+
+            /**
+             * 此测试证明是signal所在线程释放锁之后,await线程才能从await方法返回
+             * 1.从源码看,是这样的,signal将await线程unpark了
+             * 2.从锁的原子性来看也是这样的
+             * 3.一个锁定中间插入其他的线程锁定后再恢复到原锁定也没法通过signal实现
+             */
+            while (counter.get() ==1) {
+                lock.lock();
+                if(counter.get() ==1){
+                    condition.signal();
+                    for (int l = 0; l < 10; l++) {
+                        if (counter.get() == 2) {
+                            System.err.println("----------------------" + counter.get());
+                            System.exit(1);
+                        }
+                    }
+                }
+
+                lock.unlock();
+            }
+
+
+            t.join();
+        }
     }
 }
 
