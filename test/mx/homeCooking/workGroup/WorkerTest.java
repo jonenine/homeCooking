@@ -1,5 +1,6 @@
 package mx.homeCooking.workGroup;
 
+import mx.homeCooking.collections.ConcurrentBitSet;
 import org.junit.Test;
 
 import java.util.*;
@@ -234,12 +235,19 @@ public class WorkerTest {
     @Test
     public void testSchedule() {
         ThreadWorker threadWorker = new ThreadWorker("test1");
+        //ScheduledWorkerGroup threadWorker = WorkerGroups.scheduledExecutor("test", 8);
+        //ScheduledExecutorService threadWorker = Executors.newScheduledThreadPool(8);
 
+
+        final AtomicInteger counter = new AtomicInteger(0);
         new Thread(() -> {
+            int last = counter.get();
             while (true) {
                 try {
                     Thread.sleep(1000);
-                    System.err.println(new Date());
+                    int now = counter.get();
+                    System.err.println(new Date()+"---"+now+"----"+(now-last));
+                    last = now;
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
@@ -247,21 +255,23 @@ public class WorkerTest {
         }).start();
 
         Random r = new Random();
-        int sum = 10000;
+        int sum = 1000000;
 
         while (true) {
-            final AtomicInteger counter = new AtomicInteger(0);
-            final BitSet bitset = new BitSet(sum);
+            counter.set(0);
+            final ConcurrentBitSet bitset = new ConcurrentBitSet(sum);
+
             CountDownLatch cdl = new CountDownLatch(1);
             for (int i = 0; i < sum; i++) {
                 final int ii = i;
                 //时间上也要随机,定时不能总是原来越大,也要相应变小
                 final long delay = 10 + ii / 100 - (int) (10 * r.nextFloat());
                 final long date = System.currentTimeMillis() + delay;
+
                 threadWorker.innerSchedule(() -> {
                     long late = System.currentTimeMillis() - date;
-                    if (Math.abs(late) > 50) {
-                        System.err.println("调度误差超过50毫秒:" + late);
+                    if (Math.abs(late) > 100) {
+                        System.err.println("调度误差超过100毫秒:" + late);
                     }
                     int count = counter.incrementAndGet();
                     if (count > sum) {
@@ -269,19 +279,17 @@ public class WorkerTest {
                         System.exit(1);
                     }
 
-                    /**
-                     * bitset虽然不是线程安全的,但是
-                     * 1.在这个单线程中访问final
-                     * 2.最后通过CountDownLatch保证可见性
-                     */
                     assertFalse(bitset.get(ii));
                     bitset.set(ii);
 
+                    /**
+                     * 定时调度的结束时间等于最后一个任务被调度而且完成时间,所以多线程调用不一定比单线程快
+                     */
                     if (count == sum) {
                         cdl.countDown();
                     }
 
-                }, delay);
+                }, delay,TimeUnit.MILLISECONDS);
             }
 
             try {
@@ -292,8 +300,8 @@ public class WorkerTest {
 
             //引入bitset做一个校验
             assertEquals(bitset.nextClearBit(0), sum);
-
-            System.err.print("剩余定时数量:" + threadWorker.getDateSize());
+            System.err.println("-------------------------------------------------");
+            //System.err.print("剩余定时数量:" + threadWorker);
         }
     }
 
@@ -310,8 +318,12 @@ public class WorkerTest {
         int productThreadSum = 8;
         int taskSum = 300000;
 
-        ThreadWorker threadWorker = new ThreadWorker("test1");
-        //ScheduledThreadPoolExecutor threadWorker = new ScheduledThreadPoolExecutor(1);
+        //ThreadWorker threadWorker = new ThreadWorker("test1");
+        ScheduledThreadPoolExecutor threadWorker = new ScheduledThreadPoolExecutor(8);
+        /**
+         * randomProxy算法降速严重
+         */
+        //ScheduledWorkerGroup threadWorker = WorkerGroups.scheduledExecutor("test", 8);
 
         CountDownLatch[] allCdl = new CountDownLatch[1];
         AtomicInteger[] counters = new AtomicInteger[productThreadSum];
@@ -339,7 +351,7 @@ public class WorkerTest {
             for (int j = 0; j < productThreadSum; j++) {
                 final AtomicInteger counter = counters[j] = new AtomicInteger(0);
                 final AtomicInteger misCounter = new AtomicInteger(0);
-                final BitSet bitset = new BitSet(taskSum);
+                final ConcurrentBitSet bitset = new ConcurrentBitSet(taskSum);
                 final CountDownLatch cdl = new CountDownLatch(1);
 
                 int jj = j;
@@ -360,7 +372,7 @@ public class WorkerTest {
                         /**
                          * 添加任务
                          */
-                        threadWorker.innerSchedule(() -> {
+                        threadWorker.schedule(() -> {
                             long late = System.currentTimeMillis() - date;
                             if (Math.abs(late) > 50) {
                                 misCounter.incrementAndGet();
@@ -423,7 +435,8 @@ public class WorkerTest {
         ThreadWorker threadWorker = new ThreadWorker("test1");
 
         int productThreadSum = 8;
-        ExecutorService executor = Executors.newFixedThreadPool(productThreadSum);
+        //ExecutorService executor = Executors.newFixedThreadPool(productThreadSum);
+        ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(8);
 
         int taskSum = 100000;
         while (true) {

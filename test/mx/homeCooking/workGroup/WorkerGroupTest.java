@@ -26,9 +26,18 @@ public class WorkerGroupTest {
         return System.currentTimeMillis() - start;
     }
 
-    static float[] testMultiThread(ExecutorService tg) throws InterruptedException {
-        final int sum = 3000000;
-        final int producerSum = 10;
+    /**
+     * @param producerSum 入队线程数
+     * @param tg
+     * @return
+     * @throws InterruptedException
+     */
+    static float[] test10(int producerSum , ExecutorService tg) throws InterruptedException {
+        /**
+         * 每入队线程入队任务数
+         */
+        final int sum = 10000000;
+
         final CountDownLatch cdh = new CountDownLatch(producerSum);
 
         final AtomicLong enqueueTimeSum = new AtomicLong(0);
@@ -73,7 +82,7 @@ public class WorkerGroupTest {
             try {
                 WorkerGroup tg = (WorkerGroup) WorkerGroups.executor("test", 12);
                 for (int i = 0; i < 1; i++) {
-                    testMultiThread(tg);
+                    test10(8,tg);
                     System.err.println("第" + i + "批次完成");
                     //Thread.sleep(7000);
                 }
@@ -88,9 +97,9 @@ public class WorkerGroupTest {
     static ExecutorService createExecutorService() {
         //AbstractExecutorService tg = WorkerGroups.executor("test", 8);
         //WorkerGroup tg = WorkerGroups.timeoutExecutor("test", 8);
-        //AbstractExecutorService tg = WorkerGroups.scheduledExecutor("test", 8);
+        AbstractExecutorService tg = WorkerGroups.scheduledExecutor("test", 8);
         //ExecutorService tg = Executors.newFixedThreadPool(8);
-        ExecutorService tg = Executors.newScheduledThreadPool(8);
+        //ExecutorService tg = Executors.newScheduledThreadPool(8);
         //ExecutorService tg = new ForkJoinPool(8);
 
         return tg;
@@ -100,14 +109,14 @@ public class WorkerGroupTest {
      * 多线程入队测试
      */
     @Test
-    public void testPerformanceMultiThreadEnqueue() {
+    public void testPerformance(int threadNum) {
         try {
             ExecutorService tg = createExecutorService();
             long start = System.currentTimeMillis();
             float enqueueTimeSum = 0;
             float consumeTimeSum = 0;
             for (int i = 0; i < 20; i++) {
-                float[] vs = testMultiThread(tg);
+                float[] vs = test10(threadNum,tg);
                 System.err.println("第" + i + "批次完成");
                 //Thread.sleep(7000);
                 if (i >= 10) {//10-19用来计算平均时间
@@ -124,7 +133,7 @@ public class WorkerGroupTest {
 
     public static void main(String[] args) {
         WorkerGroupTest test = new WorkerGroupTest();
-        test.testPerformanceMultiThreadEnqueue();
+        test.testPerformance(1);
     }
 
 
