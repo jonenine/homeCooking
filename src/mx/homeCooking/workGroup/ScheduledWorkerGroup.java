@@ -15,6 +15,11 @@ public class ScheduledWorkerGroup extends WorkerGroup implements TimeoutSchedule
         super(groupName, coreSize, false, true);
     }
 
+
+    public TaskFuture<?> innerSchedule(Runnable command, long delay) {
+        return randomProxy().worker.schedule(command, delay, TimeUnit.MILLISECONDS);
+    }
+
     @Override
     public TaskFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
         return randomProxy().worker.schedule(command, delay, unit);

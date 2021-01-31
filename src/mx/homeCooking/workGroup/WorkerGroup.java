@@ -521,6 +521,18 @@ public class WorkerGroup extends AbstractExecutorService {
         return sum;
     }
 
+    public int getDateSize() {
+        int sum = 0;
+        for (int i = 0; i < maxAmount; i++) {
+            ThreadProxy proxy = proxies[i];
+            ScheduledThreadWorker worker = proxy.getWorker();
+            if (worker != null) {
+                sum += worker.getDateSize();
+            }
+        }
+        return sum;
+    }
+
 
     /**
      * 此类包装一个单线程的线程池

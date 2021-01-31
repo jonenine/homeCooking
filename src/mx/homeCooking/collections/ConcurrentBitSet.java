@@ -8,6 +8,9 @@ import java.util.BitSet;
 public class ConcurrentBitSet {
 
     final BitSet[] segments;
+    /**
+     * 每一个长整型长度为一个segment
+     */
     final int segmentNbits = 64;
     final int lastSegmentNbits ;
     final int concurrencyLevel;
