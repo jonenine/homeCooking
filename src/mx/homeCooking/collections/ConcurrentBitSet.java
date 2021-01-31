@@ -8,7 +8,7 @@ import java.util.BitSet;
 public class ConcurrentBitSet {
 
     final BitSet[] segments;
-    final int segmentNbits = 32;
+    final int segmentNbits = 64;
     final int lastSegmentNbits ;
     final int concurrencyLevel;
     final int nbits;
@@ -17,8 +17,7 @@ public class ConcurrentBitSet {
      * @param nbits
      */
     public ConcurrentBitSet(int nbits) {
-        //尽量以一个整数为一个segment
-        int concurrencyLevel = this.concurrencyLevel = (int) Math.ceil(new Double(nbits)/32);
+        int concurrencyLevel = this.concurrencyLevel = (int) Math.ceil(new Double(nbits)/64);
         this.nbits = nbits;
 
         segments = new BitSet[concurrencyLevel];
@@ -101,12 +100,14 @@ public class ConcurrentBitSet {
     }
 
     public static void main(String[] args) {
-        ConcurrentBitSet cbs = new ConcurrentBitSet(177);
-        for (int i = 0; i < 77; i++) {
+        ConcurrentBitSet cbs = new ConcurrentBitSet(43);
+        for (int i = 0; i < 34; i++) {
             cbs.set(i);
             cbs.showStatus();
             System.err.println(cbs.nextClearBit(0));
         }
+        Object aa = (byte)1 & (byte)2;
+        System.err.println(aa.getClass());
 
     }
 
