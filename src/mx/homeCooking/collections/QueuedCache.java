@@ -57,11 +57,11 @@ public class QueuedCache<E> extends AbstractQueue<E> {
         this.maxItemSizePerHandler = maxItemSizePerHandler;
 
         ArraySegmentNode node = new ArraySegmentNode(0);
-        unsafe.putObject(this,headSegmentOffset,node);
-        unsafe.putObject(this,tailSegmentOffset,node);
+        unsafe.putObjectVolatile(this, headSegmentOffset, node);
+        unsafe.putObjectVolatile(this, tailSegmentOffset, node);
 
         ReadHandler handler = new ReadHandler(0);
-        unsafe.putObject(this,readHandlerOffset,handler);
+        unsafe.putObjectVolatile(this, readHandlerOffset, handler);
     }
 
     public QueuedCache() {

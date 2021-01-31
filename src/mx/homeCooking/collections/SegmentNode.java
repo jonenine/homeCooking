@@ -59,6 +59,7 @@ abstract class SegmentNode<E> {
 
     /**
      * 要和read属性配合起来使用
+     * @return 返回这个segment是否已经全部读完
      */
     abstract boolean incrementReadCount() ;
 
