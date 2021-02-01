@@ -33,6 +33,9 @@ public class QueuedCache<E> extends AbstractQueue<E> {
     }
 
     /**
+     * releasedNode-->head-->node-->node-->tail
+     * head和tail move on的方向-->
+     *
      * 1.head节点保持node在内存用的,一旦head move on,前面的节点就会就释放
      * 2.read方法从head开始遍历链表,说以要满足head.startSequence<=readSequence
      * 3.一旦有segment消费完毕,head都会立即move on
