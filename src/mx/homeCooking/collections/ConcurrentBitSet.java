@@ -25,6 +25,10 @@ public class ConcurrentBitSet {
 
         segments = new BitSet[concurrencyLevel];
         int lastIndex = concurrencyLevel - 1;
+        /**
+         * 以64位为一个segment,会造成在位宽很大的时候,下面这个初始化会耗时很长
+         * todo:这个是要优化的点
+         */
         for (int i = 0; i < lastIndex; i++) {
             segments[i] = new BitSet(segmentNbits);
 
