@@ -261,8 +261,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
                              * 虽然tail已经区别于tail snapshot,,但可能tail snapshot已经被读完
                              * 造成head move on,而且head=tail,下次再读的时候还是在lock中读
                              */
-                            unsafe.compareAndSwapObject(this, readHandlerOffset, handler,
-                                    new ReadHandler(handler.getReadSequence()));
+                            unsafe.putObjectVolatile(this, readHandlerOffset,new ReadHandler(handler.getReadSequence()));
                         }
                     }
                 } finally {
