@@ -5,7 +5,9 @@ import sun.misc.Unsafe;
 
 import java.util.AbstractQueue;
 import java.util.Iterator;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -35,7 +37,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
     /**
      * releasedNode-->head-->node-->node-->tail
      * head和tail move on的方向-->
-     *
+     * <p>
      * 1.head节点保持node在内存用的,一旦head move on,前面的节点就会就释放
      * 2.read方法从head开始遍历链表,说以要满足head.startSequence<=readSequence
      * 3.一旦有segment消费完毕,head都会立即move on
@@ -264,7 +266,7 @@ public class QueuedCache<E> extends AbstractQueue<E> {
                              * 虽然tail已经区别于tail snapshot,,但可能tail snapshot已经被读完
                              * 造成head move on,而且head=tail,下次再读的时候还是在lock中读
                              */
-                            unsafe.putObjectVolatile(this, readHandlerOffset,new ReadHandler(handler.getReadSequence()));
+                            unsafe.putObjectVolatile(this, readHandlerOffset, new ReadHandler(handler.getReadSequence()));
                         }
                     }
                 } finally {
@@ -352,6 +354,55 @@ public class QueuedCache<E> extends AbstractQueue<E> {
 
         return e;
     }
+
+    /*---------------------------支持一下阻塞队列------------------------------------*/
+    private final ReentrantLock waitLock = new ReentrantLock();
+    private final Condition notEmpty = waitLock.newCondition();
+    private final AtomicInteger awaitNum = new AtomicInteger(0);
+
+    public E take() throws InterruptedException {
+        E e;
+        while ((e = read()) == null) {//1
+            /**
+             * put方法可能会在1和4之间写入并读取awaitNum
+             * 只需在4之后再读取一次即可
+             */
+            awaitNum.incrementAndGet();//4
+
+            final ReentrantLock lock = waitLock;
+            lock.lock();
+            /**
+             * signal lock可能在await lock之前,这样signal就不起作用了
+             * 在进入await lock之后再读取一次即可
+             */
+            try {
+                if((e = read()) == null){
+                    notEmpty.await();
+                }else{
+                    return e;
+                }
+            } finally {
+                lock.unlock();
+                awaitNum.decrementAndGet();
+            }
+        }
+
+        return e;
+    }
+
+    public void put(E e) {
+        write(e);//2
+        if (awaitNum.get() > 0) {//3
+            final ReentrantLock lock = waitLock;
+            lock.lock();
+            try {
+                notEmpty.signal();
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+
 
 }
 
