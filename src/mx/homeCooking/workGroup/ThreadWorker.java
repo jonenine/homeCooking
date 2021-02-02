@@ -455,7 +455,7 @@ class ThreadWorker extends AbstractExecutorService {
                  * https://stackoverflow.com/questions/53310936/is-concurrentskiplistmap-compute-safe-for-relative-updates
                  * 文章好像是说,对于skipList的值修改而言,x=x+1在多线程下是安全的
                  * 但对于回调中的代码而言,并不保证在一个key上串行化(对比concurrentHashMap#comput)
-                 * Stephen C(不知何方神圣):好像是因为使用了类似于原子值的自旋算法,从而可能会重复执行回调,而且不对回调做同步
+                 * Stephen C:好像是因为使用了类似于原子值的自旋算法,从而可能会重复执行回调,而且不对回调做同步
                  *
                  * 因为skipList的这个不严格的同步特性,最后根据测试的结果用ConcurrentHashMap的compute方法对同一个key做同步
                  *

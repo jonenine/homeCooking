@@ -4,7 +4,10 @@ import mx.homeCooking.UnsafeUtil;
 import sun.misc.Unsafe;
 
 import java.util.AbstractQueue;
+import java.util.Collection;
 import java.util.Iterator;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
@@ -13,7 +16,7 @@ import java.util.concurrent.locks.ReentrantLock;
 /**
  * 主要作为生产者和消费者之间的缓冲使用
  */
-public class QueuedCache<E> extends AbstractQueue<E> {
+public class QueuedCache<E> extends AbstractQueue<E> implements BlockingQueue<E> {
 
     static final Unsafe unsafe = UnsafeUtil.unsafe;
 
@@ -358,16 +361,19 @@ public class QueuedCache<E> extends AbstractQueue<E> {
     /*---------------------------支持一下阻塞队列------------------------------------*/
     private final ReentrantLock waitLock = new ReentrantLock();
     private final Condition notEmpty = waitLock.newCondition();
-    private final AtomicInteger awaitNum = new AtomicInteger(0);
+    /**
+     * await线程数
+     */
+    private final AtomicInteger takeAndAwaitNum = new AtomicInteger(0);
 
-    public E take() throws InterruptedException {
+    protected final E take(Long timeout, TimeUnit unit) throws InterruptedException {
         E e;
         while ((e = read()) == null) {//1
             /**
              * put方法可能会在1和4之间写入并读取awaitNum
              * 只需在4之后再读取一次即可
              */
-            awaitNum.incrementAndGet();//4
+            takeAndAwaitNum.incrementAndGet();//4
 
             final ReentrantLock lock = waitLock;
             lock.lock();
@@ -376,23 +382,29 @@ public class QueuedCache<E> extends AbstractQueue<E> {
              * 在进入await lock之后再读取一次即可
              */
             try {
-                if((e = read()) == null){
-                    notEmpty.await();
-                }else{
+                if ((e = read()) == null) {
+                    //等待超时,返回null
+                    if (timeout != null && !notEmpty.await(timeout, unit)) {
+                        return null;
+                    } else {
+                        notEmpty.await();
+                    }
+                } else {
                     return e;
                 }
             } finally {
                 lock.unlock();
-                awaitNum.decrementAndGet();
+                takeAndAwaitNum.decrementAndGet();
             }
         }
 
         return e;
     }
 
+    @Override
     public void put(E e) {
         write(e);//2
-        if (awaitNum.get() > 0) {//3
+        if (takeAndAwaitNum.get() > 0) {//3
             final ReentrantLock lock = waitLock;
             lock.lock();
             try {
@@ -401,6 +413,35 @@ public class QueuedCache<E> extends AbstractQueue<E> {
                 lock.unlock();
             }
         }
+    }
+
+    public E take() throws InterruptedException {
+        return take(null, null);
+    }
+
+    @Override
+    public E poll(long timeout, TimeUnit unit) throws InterruptedException {
+        return take(timeout, unit);
+    }
+
+    @Override
+    public int remainingCapacity() {
+       return Integer.MAX_VALUE;
+    }
+
+    @Override
+    public int drainTo(Collection<? super E> c) {
+       throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public int drainTo(Collection<? super E> c, int maxElements) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean offer(E e, long timeout, TimeUnit unit) throws InterruptedException {
+        return offer(e);
     }
 
 
