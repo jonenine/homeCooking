@@ -16,7 +16,7 @@ import java.util.concurrent.locks.ReentrantLock;
 /**
  * 主要作为生产者和消费者之间的缓冲使用
  */
-public class QueuedCache<E> extends AbstractQueue<E> implements BlockingQueue<E> {
+public class CachedQueue<E> extends AbstractQueue<E> implements BlockingQueue<E> {
 
     static final Unsafe unsafe = UnsafeUtil.unsafe;
 
@@ -27,11 +27,11 @@ public class QueuedCache<E> extends AbstractQueue<E> implements BlockingQueue<E>
     static {
         try {
             headSegmentOffset = unsafe.objectFieldOffset
-                    (QueuedCache.class.getDeclaredField("headSegment"));
+                    (CachedQueue.class.getDeclaredField("headSegment"));
             tailSegmentOffset = unsafe.objectFieldOffset
-                    (QueuedCache.class.getDeclaredField("tailSegment"));
+                    (CachedQueue.class.getDeclaredField("tailSegment"));
             readHandlerOffset = unsafe.objectFieldOffset
-                    (QueuedCache.class.getDeclaredField("readHandler"));
+                    (CachedQueue.class.getDeclaredField("readHandler"));
         } catch (NoSuchFieldException e) {
             throw new RuntimeException(e);
         }
@@ -61,7 +61,7 @@ public class QueuedCache<E> extends AbstractQueue<E> implements BlockingQueue<E>
     final int maxItemSizePerHandler;
 
 
-    public QueuedCache(int maxItemSizePerHandler) {
+    public CachedQueue(int maxItemSizePerHandler) {
         this.maxItemSizePerHandler = maxItemSizePerHandler;
 
         ArraySegmentNode node = new ArraySegmentNode(0);
@@ -72,7 +72,7 @@ public class QueuedCache<E> extends AbstractQueue<E> implements BlockingQueue<E>
         unsafe.putObjectVolatile(this, readHandlerOffset, handler);
     }
 
-    public QueuedCache() {
+    public CachedQueue() {
         this(-1);
     }
 
@@ -101,7 +101,7 @@ public class QueuedCache<E> extends AbstractQueue<E> implements BlockingQueue<E>
         }
 
         /**
-         * 计算readSequence,只给{@link QueuedCache#peek}和{@link QueuedCache#size}使用
+         * 计算readSequence,只给{@link CachedQueue#peek}和{@link CachedQueue#size}使用
          */
         long getReadSequence() {
             long seq = readSequenceBeforeSnapshot.get();
@@ -146,7 +146,7 @@ public class QueuedCache<E> extends AbstractQueue<E> implements BlockingQueue<E>
 
         /**
          * 下面的方法在lock中调用
-         * {@link QueuedCache#read}
+         * {@link CachedQueue#read}
          */
         E readTailSegmentSnapshot() {
             E e = tailSegmentSnapshot.itemAt(readTailSegmentCount);
@@ -383,7 +383,9 @@ public class QueuedCache<E> extends AbstractQueue<E> implements BlockingQueue<E>
              */
             try {
                 if ((e = read()) == null) {
-                    //等待超时,返回null
+                    /**
+                     * 等待超时,返回null
+                     */
                     if (timeout != null && !notEmpty.await(timeout, unit)) {
                         return null;
                     } else {
