@@ -69,6 +69,13 @@ public class WorkerGroup extends AbstractExecutorService {
     private volatile int amount = 0;
 
     /**
+     * 得到线程数量
+     */
+    public final int getPoolSize(){
+        return amount;
+    }
+
+    /**
      * 运维线程池
      */
     protected volatile ThreadWorker maintainThread;
