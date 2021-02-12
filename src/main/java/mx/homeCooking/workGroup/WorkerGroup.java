@@ -688,7 +688,7 @@ public class WorkerGroup extends AbstractExecutorService {
                 ScheduledThreadWorker busyWorker = proxies[busyIndex].getWorker();
                 if (busyWorker == null || oldWorker != worker) return;
                 /**
-                 * 在重平衡期间,短暂的使用慢确更加均匀的hash算法,防止出现更加不平衡
+                 * 在重平衡期间,短暂的使用慢却更加均匀的hash算法,防止出现更加不平衡
                  */
                 fp_hash = WorkerGroup.this::generateHash2;
 

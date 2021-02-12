@@ -5,29 +5,39 @@ import sun.misc.Unsafe;
 import java.lang.reflect.Field;
 
 public class UnsafeUtil {
-    volatile int random0 = 0;
-    volatile int random1 = 0;
-    volatile int random2 = 0;
-    volatile int random3 = 0;
-    volatile int random4 = 0;
-    volatile int random5 = 0;
-    volatile int random6 = 0;
-    volatile int random7 = 0;
+    private long p01, p02, p03, p04, p05, p06, p07, p08, p09, p0a, p0b, p0c, p0d, p0e, p0f, p0g, p0h, p0i, p0j, p0k;
+    private volatile long random0 = 0;
+    private long p11, p12, p13, p14, p15, p16, p17, p18, p19, p1a, p1b, p1c, p1d, p1e, p1f, p1g, p1h, p1i, p1j, p1k;
+    private volatile long random1 = 8;
+    private long p21, p22, p23, p24, p25, p26, p27, p28, p29, p2a, p2b, p2c, p2d, p2e, p2f, p2g, p2h, p2i, p2j, p2k;
+    private volatile long random2 = 16;
+    private long p31, p32, p33, p34, p35, p36, p37, p38, p39, p3a, p3b, p3c, p3d, p3e, p3f, p3g, p3h, p3i, p3j, p3k;
+    private volatile long random3 = 24;
+    private long p41, p42, p43, p44, p45, p46, p47, p48, p49, p4a, p4b, p4c, p4d, p4e, p4f, p4g, p4h, p4i, p4j, p4k;
+    private volatile long random4 = 32;
+    private long p51, p52, p53, p54, p55, p56, p57, p58, p59, p5a, p5b, p5c, p5d, p5e, p5f, p5g, p5h, p5i, p5j, p5k;
+    private volatile long random5 = 40;
+    private long p61, p62, p63, p64, p65, p66, p67, p68, p69, p6a, p6b, p6c, p6d, p6e, p6f, p6g, p6h, p6i, p6j, p6k;
+    private volatile long random6 = 48;
+    private long p71, p72, p73, p74, p75, p76, p77, p78, p79, p7a, p7b, p7c, p7d, p7e, p7f, p7g, p7h, p7i, p7j, p7k;
+    private volatile long random7 = 56;
+    private long p81, p82, p83, p84, p85, p86, p87, p88, p89, p8a, p8b, p8c, p8d, p8e, p8f, p8g, p8h, p8i, p8j, p8k;
 
     /**
-     * 假设random0-8的偏移地址如下
-     * 12
-     * 16
-     * 20
-     * 24
-     * 28
-     * 32
-     * 36
-     * 40
-     * 性能和ThreadLocalRandom.current().nextInt(4096);类似或稍好,性能差别很小
+     * 1.一个线程实际只对应唯一一个random变量,可以去掉所有变量的volatile关键字,但去掉后,反而慢
+     * 2.消除cpu缓存行的影响是有效果的,但效果较小
+     * 性能和ThreadLocalRandom.current().nextInt(4096)依然有不到一倍的差距
      */
-    public int random() {
-        return Math.abs(unsafe.getAndAddInt(this, (Thread.currentThread().getId() % 8 + 3) * 4, 1));
+    public long random() {
+        long offset = offset(Thread.currentThread().getId() % 8);
+        long value = unsafe.getLongVolatile(this, offset) + 1;
+        unsafe.putOrderedLong(this, offset, value);
+        return Math.abs(value);
+    }
+
+
+    private static final long offset(long varSeg) {
+        return base + varSeg * interval;
     }
 
     /**
@@ -43,8 +53,8 @@ public class UnsafeUtil {
     static final long[] offsets = new long[8];
 
     public static final Unsafe unsafe;
-    static final long firstOffset;
-    static final long modInterval;
+    static final long base;
+    static final long interval;
 
     static {
         try {
@@ -65,11 +75,10 @@ public class UnsafeUtil {
                     }
                 }
             }
-            firstOffset = offsets[0];
-            modInterval = firstOffset / 4;
-            if (modInterval != 3) {
-                System.err.println("mod后面加的数字不对");
-            }
+            //首地址
+            base = offsets[0];
+            //一般差距是4
+            interval = offsets[1] - base;
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
