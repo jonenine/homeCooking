@@ -180,7 +180,7 @@ public class WorkerGroup extends AbstractExecutorService {
     }
 
     /**
-     * 更均匀的算法
+     * 更均匀的算法,这个速度也不错
      */
     private final int generateHash2(Void nil) {
         return ThreadLocalRandom.current().nextInt(4096);
