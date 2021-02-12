@@ -20,7 +20,7 @@ public class UnsafeUtil {
      * 2.消除cpu缓存行的影响很小
      * 性能比ThreadLocalRandom.current().nextInt(4096)略好,最好的方式还是做进线程对象内
      */
-    public long random() {
+    public int random() {
         long offset = offset(Thread.currentThread().getId() % 8);
         int value = unsafe.getInt(this, offset) + 1;
         unsafe.putInt(this, offset, value);
