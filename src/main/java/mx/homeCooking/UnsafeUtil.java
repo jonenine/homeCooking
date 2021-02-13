@@ -1,31 +1,42 @@
 package mx.homeCooking;
 
+import sun.misc.Contended;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Field;
 import java.util.concurrent.LinkedTransferQueue;
 
 public class UnsafeUtil {
-    private int random0 = 0;
-    private int random1 = 8;
-    private int random2 = 16;
-    private int random3 = 24;
-    private int random4 = 32;
-    private int random5 = 40;
-    private int random6 = 48;
-    private int random7 = 56;
+    @Contended
+    private int random0 = 1;
+    @Contended
+    private int random1 = 2;
+    @Contended
+    private int random2 = 5;
+    @Contended
+    private int random3 = 8;
+    @Contended
+    private int random4 = 17;
+    @Contended
+    private int random5 = 32;
+    @Contended
+    private int random6 = 63;
+    @Contended
+    private int random7 = 128;
 
     /**
      * 1.一个线程实际只对应唯一一个random变量,可以去掉所有变量的volatile关键字
-     * 2.消除cpu缓存行的影响很小
+     * 2.消除cpu缓存行的影效果不大(貌似有一些效果),当前cpu为i5-10210
      * 性能比ThreadLocalRandom.current().nextInt(4096)略好,最好的方式还是做进线程对象内
      */
     public int random() {
         long offset = offset(Thread.currentThread().getId() % 8);
-        int value = unsafe.getInt(this, offset) + 1;
+        //+2比+1要快,在吞吐量小的时候快的还很明显,有意思
+        int value = unsafe.getInt(this, offset) + 2;
         unsafe.putInt(this, offset, value);
         return Math.abs(value);
     }
+
 
     public final void showRandoms(){
         StringBuilder sb = new StringBuilder();
