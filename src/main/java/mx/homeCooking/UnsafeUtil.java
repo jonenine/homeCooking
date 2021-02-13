@@ -27,12 +27,17 @@ public class UnsafeUtil {
     /**
      * 1.一个线程实际只对应唯一一个random变量,可以去掉所有变量的volatile关键字
      * 2.消除cpu缓存行的影效果不大(貌似有一些效果),当前cpu为i5-10210
-     * 性能比ThreadLocalRandom.current().nextInt(4096)略好,最好的方式还是做进线程对象内
+     * 性能比ThreadLocalRandom.current().nextInt(4096)略好
      */
     public int random() {
+        /**
+         * 分散到多个变量上,不分散会很慢,只要分散到两个速度就会翻倍
+         * 即使不考虑同步,多线程读写普通变量还是有成本的
+         */
         long offset = offset(Thread.currentThread().getId() % 8);
         //+2比+1要快,在吞吐量小的时候快的还很明显,有意思
         int value = unsafe.getInt(this, offset) + 2;
+        //性能主要消耗在写变量上面,只要写变量就会慢下来,估计和写在什么地方关系不大
         unsafe.putInt(this, offset, value);
         return Math.abs(value);
     }
