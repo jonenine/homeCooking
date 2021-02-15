@@ -4,7 +4,6 @@ import sun.misc.Contended;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Field;
-import java.util.concurrent.LinkedTransferQueue;
 
 public class UnsafeUtil {
     @Contended
@@ -20,7 +19,7 @@ public class UnsafeUtil {
     @Contended
     private int random5 = 32;
     @Contended
-    private int random6 = 63;
+    private int random6 = 61;
     @Contended
     private int random7 = 128;
 
@@ -35,7 +34,10 @@ public class UnsafeUtil {
          * 即使不考虑同步,多线程读写普通变量还是有成本的
          */
         long offset = offset(Thread.currentThread().getId() % 8);
-        //+2比+1要快,在吞吐量小的时候快的还很明显,有意思
+        /**
+         * +2比+1要快,在吞吐量小的时候快的还很明显,有意思,
+         * 加2后奇数合适奇数,偶数还是偶数,减少不同线程入队到同一个worker的几率
+         */
         int value = unsafe.getInt(this, offset) + 2;
         //性能主要消耗在写变量上面,只要写变量就会慢下来,估计和写在什么地方关系不大
         unsafe.putInt(this, offset, value);
