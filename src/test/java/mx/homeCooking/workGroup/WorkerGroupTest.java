@@ -95,10 +95,10 @@ public class WorkerGroupTest {
     }
 
     static ExecutorService createExecutorService() {
-        AbstractExecutorService tg = WorkerGroups.executor("test", 8);
+        //AbstractExecutorService tg = WorkerGroups.executor("test", 8);
         //WorkerGroup tg = WorkerGroups.timeoutExecutor("test", 8);
         //AbstractExecutorService tg = WorkerGroups.scheduledExecutor("test", 8);
-        //ExecutorService tg = Executors.newFixedThreadPool(8);
+        ExecutorService tg = Executors.newFixedThreadPool(8);
         //ExecutorService tg = Executors.newScheduledThreadPool(8);
         //ExecutorService tg = new ForkJoinPool(8);
 
