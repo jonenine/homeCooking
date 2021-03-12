@@ -1,0 +1,4 @@
+1.todo
+2.在一个线程组中
+3.com.ls.tj.cj30.base.engine.test.simple.TestProcessor任务分配不均的问题
+4.在blockTest，在其中一个processor中使用线程sleep，会导致线程池接近卡死的状态，而换成传统线程池就没有问题
