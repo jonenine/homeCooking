@@ -5,7 +5,7 @@ high performance thread pool
 
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;比如我们写一个测试用例，对线程池进行压测。入队的任务很简单，就是Atomic变量自增，采用多个独立线程入队。在JProfiler上观察测试程序的执行状况，入队线程和工作线程基本都是红色的，线程基本都是处于blocking状态中，java进程占用操作系统核心较高，程序的吞吐量提升不上去。
 
-![](media/be598fa29c141a38ce2476fadada07d1.png)
+![](https://github.com/jonenine/homeCooking/blob/main/docs/images/1.png)
 
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;其实，这主要是线程池中多线程争抢单个队列造成的。最好的(也是唯一的)解决方法就是将一个队列变成多个队列，比如每个工作线程都有自己的队列，线程池变成worker-group结构。
 
@@ -27,7 +27,7 @@ high performance thread pool
 
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;下面是homeCooking线程池在jprofiler上的测试情况
 
-![](media/bf2e90d769f8c88eb87cf663a500d22a.png)
+![](https://github.com/jonenine/homeCooking/blob/main/docs/images/2.png)
 
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;可以看到线程入队时还是有零星的红色，但整体阻塞的情况已经好了很多
 
